@@ -1,0 +1,11 @@
+{
+    "name": "Infotext Slides",
+    "author": "OKTV-RLP",
+    "desc": "Spielt eine M3U8-Playlist mit Bildsequenzen via HTTP(S). Unterstützt Crossfade, Alphakanal, Backup-Media und optionalen Hintergrund inkl. Audio.",
+    "repository": "https://github.com/OKTV-RLP/info-beamer-slides",
+    "platforms": [
+        "pi/v6",
+        "pi/v7",
+        "pi/v8"
+    ]
+}
