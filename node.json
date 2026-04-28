@@ -57,7 +57,10 @@
             "title": "Backup-Inhalt (Bild oder Video)",
             "name": "backup_media",
             "type": "resource",
-            "valid": ["image", "video"],
+            "valid": [
+                "image",
+                "video"
+            ],
             "default": "empty.png",
             "hint": "Wird angezeigt, wenn die Playlist nicht geladen werden kann oder leer ist. Bilder funktionieren auf jedem Pi; Video-Loops setzen Pi 4 oder neuer voraus."
         },
@@ -65,8 +68,12 @@
             "title": "Hintergrund-Inhalt (Bild oder Video, optional)",
             "name": "background_media",
             "type": "resource",
-            "valid": ["image", "video"],
+            "valid": [
+                "image",
+                "video"
+            ],
             "optional": true,
+            "default": "empty.png",
             "hint": "Bild oder MP4-Loop hinter den Folien. Bilder funktionieren auf jedem Pi; Video-Loops setzen Pi 4 oder neuer voraus (raw=true GL-Pipeline). Transparente PNG-Folien lassen den Hintergrund durchscheinen."
         }
     ]
