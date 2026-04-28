@@ -1,0 +1,73 @@
+{
+    "name": "dpInfotext Player",
+    "permissions": {
+        "network": "Lädt Playlist und Folien vom dextera-plus-Server."
+    },
+    "options": [
+        {
+            "title": "Playlist-URL",
+            "name": "playlist_url",
+            "type": "string",
+            "default": "https://example.com/dextera/infotext_output/dpInfotext.m3u8",
+            "hint": "URL der M3U8-Playlist. http:// und https:// werden unterstützt."
+        },
+        {
+            "title": "Folien-Basis-URL",
+            "name": "folien_base_url",
+            "type": "string",
+            "default": "https://example.com/dextera/infotext_output/",
+            "hint": "Basis-URL des Folienverzeichnisses. Wird bei Bedarf um '/' am Ende ergänzt."
+        },
+        {
+            "title": "Self-signed-HTTPS akzeptieren",
+            "name": "allow_insecure_https",
+            "type": "boolean",
+            "default": false,
+            "hint": "Schaltet die TLS-Zertifikatsprüfung ab. Notwendig bei selbstsignierten Zertifikaten. Achtung: hebt den Schutz vor Man-in-the-Middle-Angriffen auf — nur in vertrauenswürdigen Netzen einsetzen."
+        },
+        {
+            "title": "Polling-Intervall (Sekunden)",
+            "name": "poll_interval",
+            "type": "integer",
+            "default": 60,
+            "hint": "Wie oft der Service-Sidecar die Playlist neu prüft. Niedriger = schnellere Updates, mehr Last auf dem dextera-plus-Server."
+        },
+        {
+            "title": "Wiederholversuch (Sekunden)",
+            "name": "retry_interval",
+            "type": "integer",
+            "default": 30,
+            "hint": "Pause vor erneutem Versuch nach HTTP-Fehler oder leerer Playlist."
+        },
+        {
+            "title": "Fade-Dauer (Sekunden)",
+            "name": "fade_duration",
+            "type": "float",
+            "default": 0.5,
+            "hint": "Crossfade-Dauer zwischen zwei Folien (intra- und inter-Zyklus)."
+        },
+        {
+            "title": "Standard-Anzeigedauer (Sekunden)",
+            "name": "default_duration",
+            "type": "integer",
+            "default": 10,
+            "hint": "Fallback für Folien ohne #EXTINF-Wert."
+        },
+        {
+            "title": "Backup-Inhalt (Bild oder Video)",
+            "name": "backup_media",
+            "type": "resource",
+            "valid": ["image", "video"],
+            "default": "empty.png",
+            "hint": "Wird angezeigt, wenn die Playlist nicht geladen werden kann oder leer ist. Bilder funktionieren auf jedem Pi; Video-Loops setzen Pi 4 oder neuer voraus."
+        },
+        {
+            "title": "Hintergrund-Inhalt (Bild oder Video, optional)",
+            "name": "background_media",
+            "type": "resource",
+            "valid": ["image", "video"],
+            "optional": true,
+            "hint": "Bild oder MP4-Loop hinter den Folien. Bilder funktionieren auf jedem Pi; Video-Loops setzen Pi 4 oder neuer voraus (raw=true GL-Pipeline). Transparente PNG-Folien lassen den Hintergrund durchscheinen."
+        }
+    ]
+}

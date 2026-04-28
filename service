@@ -1,0 +1,211 @@
+#!/usr/bin/python2.7
+# -*- coding: utf-8 -*-
+#
+# dpInfotext Player - Service-Sidecar
+#
+# info-beamer-Lua-Knoten koennen kein HTTP. Dieser Sidecar laeuft als
+# Python-Prozess parallel zum Knoten, pollt regelmaessig die M3U8-
+# Playlist + Folien-Bilder vom dextera-plus-Server und schreibt die
+# heruntergeladenen Folien in das lokale Cache-Verzeichnis. Eine
+# manifest.json mit der aktuellen Folienliste wird via util.json_watch
+# vom node.lua beobachtet.
+#
+# Konfiguration kommt aus config.json (gleicher Pfad wie fuer Lua).
+# Der Service liest sie in jeder Schleifen-Iteration neu, damit
+# Setup-Aenderungen ohne Neustart wirken.
+
+import os
+import sys
+import json
+import time
+import hashlib
+import traceback
+
+import requests
+import urllib3
+
+CACHE_DIR = "cache"
+MANIFEST  = "manifest.json"
+CONFIG    = "config.json"
+
+
+def log(msg):
+    sys.stderr.write("[dpInfotext-service] %s\n" % msg)
+    sys.stderr.flush()
+
+
+def load_config():
+    try:
+        with open(CONFIG) as f:
+            return json.load(f)
+    except Exception as e:
+        log("config.json konnte nicht gelesen werden: %s" % e)
+        return {}
+
+
+def parse_m3u8(text, default_dur):
+    entries = []
+    duration = default_dur
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("#EXTINF:"):
+            try:
+                duration = int(line.split("#EXTINF:", 1)[1].split(",", 1)[0])
+            except Exception:
+                pass
+        elif line and not line.startswith("#"):
+            # Nur Dateiname, falls die Playlist absolute oder relative
+            # Pfade enthaelt.
+            name = line.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+            if name:
+                entries.append({"name": name, "duration": duration})
+            duration = default_dur
+    return entries
+
+
+def write_manifest(entries):
+    out = {
+        "slides": [
+            {"file": os.path.join(CACHE_DIR, e["name"]),
+             "duration": e["duration"]}
+            for e in entries
+        ],
+    }
+    tmp = MANIFEST + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(out, f)
+    os.rename(tmp, MANIFEST)
+
+
+def download_to(url, dest, verify, timeout):
+    r = requests.get(url, verify=verify, timeout=timeout, stream=True)
+    r.raise_for_status()
+    tmp = dest + ".tmp"
+    with open(tmp, "wb") as f:
+        for chunk in r.iter_content(chunk_size=65536):
+            if chunk:
+                f.write(chunk)
+    os.rename(tmp, dest)
+
+
+def main():
+    if not os.path.isdir(CACHE_DIR):
+        os.makedirs(CACHE_DIR)
+
+    last_manifest_hash = None
+    insecure_warning_active = False
+
+    while True:
+        try:
+            cfg = load_config()
+            playlist_url   = (cfg.get("playlist_url")    or "").strip()
+            base_url       = (cfg.get("folien_base_url") or "").strip()
+            default_dur    = int(cfg.get("default_duration") or 10)
+            poll_interval  = max(5,  int(cfg.get("poll_interval")  or 60))
+            retry_interval = max(5,  int(cfg.get("retry_interval") or 30))
+            verify         = not bool(cfg.get("allow_insecure_https"))
+
+            # urllib3-Warnings bei jeder Konfig-Aenderung (de)aktivieren.
+            if not verify and not insecure_warning_active:
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                requests.packages.urllib3.disable_warnings(
+                    requests.packages.urllib3.exceptions.InsecureRequestWarning
+                )
+                log("WARNUNG: TLS-Pruefung abgeschaltet (allow_insecure_https=true).")
+                insecure_warning_active = True
+            elif verify:
+                insecure_warning_active = False
+
+            if not playlist_url or not base_url:
+                log("playlist_url oder folien_base_url nicht konfiguriert.")
+                time.sleep(retry_interval)
+                continue
+
+            if not base_url.endswith("/"):
+                base_url += "/"
+
+            # Playlist holen.
+            try:
+                r = requests.get(playlist_url, verify=verify, timeout=10)
+                r.raise_for_status()
+                playlist_text = r.text
+            except Exception as e:
+                log("Playlist-Fetch fehlgeschlagen: %s" % e)
+                time.sleep(retry_interval)
+                continue
+
+            entries = parse_m3u8(playlist_text, default_dur)
+
+            if not entries:
+                if last_manifest_hash != "EMPTY":
+                    write_manifest([])
+                    last_manifest_hash = "EMPTY"
+                    log("Playlist leer.")
+                time.sleep(retry_interval)
+                continue
+
+            # Fehlende Folien herunterladen. Filenames sind content-
+            # adressiert (gleicher Name == gleicher Inhalt), daher reicht
+            # eine Existenzpruefung im Cache.
+            for entry in entries:
+                local = os.path.join(CACHE_DIR, entry["name"])
+                if os.path.exists(local):
+                    continue
+                try:
+                    download_to(base_url + entry["name"], local, verify, 30)
+                except Exception as e:
+                    log("Folie-Download fehlgeschlagen %s: %s" %
+                        (entry["name"], e))
+
+            # Cache aufraeumen: entferne Folien-Files, die nicht mehr
+            # in der aktuellen Playlist sind, sowie .tmp-Reste aus
+            # abgebrochenen Downloads. Laeuft nur nach erfolgreichem
+            # Playlist-Fetch (HTTP-Fehler springen vorher per `continue`),
+            # daher kein versehentlicher Komplett-Wipe wegen Netzproblem.
+            keep = set(e["name"] for e in entries)
+            removed = 0
+            try:
+                for fname in os.listdir(CACHE_DIR):
+                    if fname.endswith(".tmp") or fname not in keep:
+                        try:
+                            os.remove(os.path.join(CACHE_DIR, fname))
+                            removed += 1
+                        except OSError:
+                            pass
+            except OSError as e:
+                log("Cache-GC fehlgeschlagen: %s" % e)
+            if removed:
+                log("Cache aufgeraeumt: %d Datei(en) entfernt." % removed)
+
+            available = [
+                e for e in entries
+                if os.path.exists(os.path.join(CACHE_DIR, e["name"]))
+            ]
+
+            if not available:
+                log("Keine Folie ladbar.")
+                time.sleep(retry_interval)
+                continue
+
+            # Hash ueber tatsaechlich verfuegbare Folien — auch bei
+            # gleichem Playlist-Body neu schreiben, falls neue Downloads
+            # hinzugekommen sind.
+            sig = "|".join("%s:%d" % (e["name"], e["duration"]) for e in available)
+            available_hash = hashlib.sha1(sig.encode("utf-8")).hexdigest()
+
+            if available_hash != last_manifest_hash:
+                write_manifest(available)
+                last_manifest_hash = available_hash
+                log("Manifest aktualisiert: %d Folien." % len(available))
+
+            time.sleep(poll_interval)
+        except KeyboardInterrupt:
+            log("beendet.")
+            return
+        except Exception:
+            log("Unerwarteter Fehler:\n%s" % traceback.format_exc())
+            time.sleep(5)
+
+
+if __name__ == "__main__":
+    main()
