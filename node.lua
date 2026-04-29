@@ -1,4 +1,4 @@
--- dpInfotext Player für info-beamer hosted
+-- Infotext Player für info-beamer hosted
 --
 -- Reiner Renderer: HTTP-Fetching erfolgt im Python-Service-Sidecar
 -- (siehe ./service), der Folien herunterlädt und manifest.json schreibt.
@@ -317,7 +317,7 @@ end)
 
 -- Bild auf den vollen Bildschirm strecken (kein Letterbox). Bei
 -- abweichendem Seitenverhältnis verzerrt es — Folien daher in nativer
--- Display-Auflösung anliefern (dextera-plus rendert ohnehin so).
+-- Display-Auflösung anliefern.
 local function draw_fit(res, alpha)
     if not res then return end
     res:draw(0, 0, WIDTH, HEIGHT, alpha)

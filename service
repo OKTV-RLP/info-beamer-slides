@@ -1,11 +1,11 @@
 #!/usr/bin/python2.7
 # -*- coding: utf-8 -*-
 #
-# dpInfotext Player - Service-Sidecar
+# Infotext Player - Service-Sidecar
 #
 # info-beamer-Lua-Knoten koennen kein HTTP. Dieser Sidecar laeuft als
 # Python-Prozess parallel zum Knoten, pollt regelmaessig die M3U8-
-# Playlist + Folien-Bilder vom dextera-plus-Server und schreibt die
+# Playlist + Folien-Bilder vom Infotext-Server und schreibt die
 # heruntergeladenen Folien in das lokale Cache-Verzeichnis. Eine
 # manifest.json mit der aktuellen Folienliste wird via util.json_watch
 # vom node.lua beobachtet.
@@ -30,7 +30,7 @@ CONFIG    = "config.json"
 
 
 def log(msg):
-    sys.stderr.write("[dpInfotext-service] %s\n" % msg)
+    sys.stderr.write("[infotext-service] %s\n" % msg)
     sys.stderr.flush()
 
 

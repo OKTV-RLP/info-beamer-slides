@@ -1,10 +1,7 @@
-# dpInfotext Player für info-beamer hosted
+# Infotext Player für info-beamer hosted
 
-Spielt die von [dextera-plus](https://github.com/OKTV-RLP/dextera-plus)
-erzeugten Folien (`infotext_output/dpInfotext.m3u8` + PNG-Folien mit
-Alphakanal) auf einem info-beamer-hosted-Pi ab. Verhalten orientiert
-sich am Browser-basierten HTML-Player im dextera-plus-Repo
-(`www_public/infotext-player.html`).
+Spielt Folien (`playlist.m3u8` + PNG-Folien mit optionalem
+Alphakanal) auf einem info-beamer-hosted-Pi ab.
 
 ## Architektur
 
@@ -52,7 +49,7 @@ node.lua       ← Renderer: liest manifest via util.json_watch, lädt
    Setup auswählen — sonst wird `empty.png` verwendet (schwarzes Bild).
 4. Optional: Hintergrund-Asset (Bild oder Video) hochladen und im
    Setup-Feld *Hintergrund-Inhalt* auswählen.
-5. `Playlist-URL` und `Folien-Basis-URL` des dextera-plus-Servers
+5. `Playlist-URL` und `Folien-Basis-URL` des Infotext-Servers
    eintragen, ggf. *Self-signed-HTTPS akzeptieren* einschalten, Setup
    einem Device zuweisen.
 
@@ -60,7 +57,7 @@ node.lua       ← Renderer: liest manifest via util.json_watch, lädt
 
 | Option | Default | Beschreibung |
 |---|---|---|
-| Playlist-URL | – | M3U8 vom dextera-plus-Server (http:// oder https://) |
+| Playlist-URL | – | M3U8-Playlist-URL (http:// oder https://) |
 | Folien-Basis-URL | – | Verzeichnis-URL der Folien-Bilder |
 | Self-signed-HTTPS akzeptieren | false | TLS-Pruefung deaktivieren |
 | Polling-Intervall | 60 s | Wie oft der Service die Playlist prüft |
@@ -134,9 +131,9 @@ vom Hintergrund-Video, sofern eines konfiguriert ist.
 
 - info-beamer hosted Runtime (Service-Sidecar mit Python 2.7 und
   `requests` ist Standard).
-- Erreichbarkeit des dextera-plus-Servers per HTTP/HTTPS vom Pi aus.
+- Erreichbarkeit des Quell-Servers per HTTP/HTTPS vom Pi aus.
 - Folien-Filenames müssen content-addressed sein (gleicher Name ⇒
-  gleicher Inhalt) — dextera-plus liefert das per Default.
+  gleicher Inhalt).
 - Für Video-Loops: Raspberry Pi 4 oder neuer.
 
 ## Caching-Verhalten
@@ -164,8 +161,8 @@ Falls du auf einem Pi außerhalb der Hosted-Plattform testen willst:
 # config.json manuell anlegen:
 cat > config.json <<EOF
 {
-    "playlist_url": "https://dein-server/dextera/infotext_output/dpInfotext.m3u8",
-    "folien_base_url": "https://dein-server/dextera/infotext_output/",
+    "playlist_url": "https://dein-server/slides/playlist.m3u8",
+    "folien_base_url": "https://dein-server/slides/",
     "allow_insecure_https": false,
     "poll_interval": 60,
     "retry_interval": 30,

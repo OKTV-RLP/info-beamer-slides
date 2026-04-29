@@ -1,21 +1,21 @@
 {
-    "name": "dpInfotext Player",
+    "name": "Infotext Player",
     "permissions": {
-        "network": "Lädt Playlist und Folien vom dextera-plus-Server."
+        "network": "Lädt Playlist und Folien via HTTP."
     },
     "options": [
         {
             "title": "Playlist-URL",
             "name": "playlist_url",
             "type": "string",
-            "default": "https://example.com/dextera/infotext_output/dpInfotext.m3u8",
+            "default": "https://example.com/slides/playlist.m3u8",
             "hint": "URL der M3U8-Playlist. http:// und https:// werden unterstützt."
         },
         {
             "title": "Folien-Basis-URL",
             "name": "folien_base_url",
             "type": "string",
-            "default": "https://example.com/dextera/infotext_output/",
+            "default": "https://example.com/slides/",
             "hint": "Basis-URL des Folienverzeichnisses. Wird bei Bedarf um '/' am Ende ergänzt."
         },
         {
@@ -30,7 +30,7 @@
             "name": "poll_interval",
             "type": "integer",
             "default": 60,
-            "hint": "Wie oft der Service-Sidecar die Playlist neu prüft. Niedriger = schnellere Updates, mehr Last auf dem dextera-plus-Server."
+            "hint": "Wie oft der Service-Sidecar die Playlist neu prüft. Niedriger = schnellere Updates, mehr Last auf dem Infotext-Server."
         },
         {
             "title": "Wiederholversuch (Sekunden)",
