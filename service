@@ -6,9 +6,15 @@
 # info-beamer-Lua-Knoten koennen kein HTTP. Dieser Sidecar laeuft als
 # Python-Prozess parallel zum Knoten, pollt regelmaessig die M3U8-
 # Playlist + Folien-Bilder vom Infotext-Server und schreibt die
-# heruntergeladenen Folien in das lokale Cache-Verzeichnis. Eine
+# heruntergeladenen Folien direkt in das Knoten-Verzeichnis. Eine
 # manifest.json mit der aktuellen Folienliste wird via util.json_watch
 # vom node.lua beobachtet.
+#
+# Folien-Files erhalten den Praefix SLIDE_PREFIX, damit sie sich klar
+# von den Knoten-eigenen Dateien (node.lua, node.json, empty.png, ...)
+# unterscheiden lassen. Ein Cache-Unterverzeichnis vermeiden wir, weil
+# info-beamer Folien aus zur Laufzeit befuellten Subdirs nicht
+# zuverlaessig findet (Subdir = Child-Node).
 #
 # Konfiguration kommt aus config.json (gleicher Pfad wie fuer Lua).
 # Der Service liest sie in jeder Schleifen-Iteration neu, damit
@@ -24,9 +30,9 @@ import traceback
 import requests
 import urllib3
 
-CACHE_DIR = "cache"
-MANIFEST  = "manifest.json"
-CONFIG    = "config.json"
+SLIDE_PREFIX = "slide_"
+MANIFEST     = "manifest.json"
+CONFIG       = "config.json"
 
 
 def log(msg):
@@ -63,10 +69,14 @@ def parse_m3u8(text, default_dur):
     return entries
 
 
+def slide_filename(name):
+    return SLIDE_PREFIX + name
+
+
 def write_manifest(entries):
     out = {
         "slides": [
-            {"file": os.path.join(CACHE_DIR, e["name"]),
+            {"file": slide_filename(e["name"]),
              "duration": e["duration"]}
             for e in entries
         ],
@@ -89,9 +99,6 @@ def download_to(url, dest, verify, timeout):
 
 
 def main():
-    if not os.path.isdir(CACHE_DIR):
-        os.makedirs(CACHE_DIR)
-
     last_manifest_hash = None
     insecure_warning_active = False
 
@@ -148,7 +155,7 @@ def main():
             # adressiert (gleicher Name == gleicher Inhalt), daher reicht
             # eine Existenzpruefung im Cache.
             for entry in entries:
-                local = os.path.join(CACHE_DIR, entry["name"])
+                local = slide_filename(entry["name"])
                 if os.path.exists(local):
                     continue
                 try:
@@ -157,18 +164,23 @@ def main():
                     log("Folie-Download fehlgeschlagen %s: %s" %
                         (entry["name"], e))
 
-            # Cache aufraeumen: entferne Folien-Files, die nicht mehr
-            # in der aktuellen Playlist sind, sowie .tmp-Reste aus
-            # abgebrochenen Downloads. Laeuft nur nach erfolgreichem
-            # Playlist-Fetch (HTTP-Fehler springen vorher per `continue`),
-            # daher kein versehentlicher Komplett-Wipe wegen Netzproblem.
-            keep = set(e["name"] for e in entries)
+            # Cache aufraeumen: entferne nur Files mit unserem Praefix,
+            # die nicht mehr in der aktuellen Playlist sind, sowie
+            # .tmp-Reste aus abgebrochenen Downloads. Knoten-eigene
+            # Dateien (node.lua, node.json, empty.png, ...) werden durch
+            # die Praefix-Pruefung verschont. Laeuft nur nach
+            # erfolgreichem Playlist-Fetch (HTTP-Fehler springen vorher
+            # per `continue`), daher kein versehentlicher Komplett-Wipe
+            # wegen Netzproblem.
+            keep = set(slide_filename(e["name"]) for e in entries)
             removed = 0
             try:
-                for fname in os.listdir(CACHE_DIR):
+                for fname in os.listdir("."):
+                    if not fname.startswith(SLIDE_PREFIX):
+                        continue
                     if fname.endswith(".tmp") or fname not in keep:
                         try:
-                            os.remove(os.path.join(CACHE_DIR, fname))
+                            os.remove(fname)
                             removed += 1
                         except OSError:
                             pass
@@ -179,7 +191,7 @@ def main():
 
             available = [
                 e for e in entries
-                if os.path.exists(os.path.join(CACHE_DIR, e["name"]))
+                if os.path.exists(slide_filename(e["name"]))
             ]
 
             if not available:
