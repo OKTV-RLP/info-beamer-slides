@@ -232,6 +232,13 @@
             "type": "string",
             "default": "",
             "hint": "z.B. http://stream.example.com:8000/radio.mp3. MP3-Icecast-Streams sind am zuverlässigsten. Stream wird bei Verbindungsabbruch automatisch neu verbunden."
+        },
+        {
+            "title": "Stream-Lautstärke (dB)",
+            "name": "audio_stream_volume_db",
+            "type": "float",
+            "default": 0,
+            "hint": "Pegel in Dezibel. 0 = volle Lautstärke, -6 dB ≈ halbe Amplitude, -20 dB = leiser Hintergrund, ≤ -60 dB = stumm. Werte > 0 werden auf 0 begrenzt. Änderung wird im laufenden Betrieb sofort übernommen."
         }
     ]
 }
