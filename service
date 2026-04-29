@@ -112,6 +112,12 @@ def download_to(url, dest, verify, timeout):
 # (das wuerde tzdata neu parsen).
 _tz_cache = {}
 
+# Letzter geschriebener time.txt-Inhalt — wir schreiben nur, wenn er
+# sich geaendert hat, um SD-Karten-Schreibzyklen zu sparen. Bei einem
+# Format wie %H:%M bedeutet das ~1 Write/Minute statt 1 Write/Sekunde
+# (60x weniger). Bei %H:%M:%S bleibt's allerdings bei 1 Write/Sekunde.
+_last_time_text = None
+
 
 def get_tz(name):
     if not name:
@@ -130,6 +136,13 @@ def get_tz(name):
 
 
 def update_time_file(cfg):
+    global _last_time_text
+
+    # Wenn das Overlay deaktiviert ist, brauchen wir gar nicht erst zu
+    # schreiben — Lua ignoriert time.txt in dem Fall ohnehin.
+    if not cfg.get("time_enabled"):
+        return
+
     fmt = cfg.get("time_format") or "%H:%M"
     tz_name = (cfg.get("time_timezone") or "").strip()
 
@@ -151,11 +164,18 @@ def update_time_file(cfg):
     if isinstance(text, bytes):
         text = text.decode("utf-8", "replace")
 
+    # Nur schreiben, wenn der Inhalt sich geaendert hat — schont die
+    # SD-Karte erheblich, weil bei minutengenauen Formaten wie %H:%M
+    # nur einmal pro Minute statt einmal pro Sekunde geschrieben wird.
+    if text == _last_time_text:
+        return
+
     tmp = TIME_FILE + ".tmp"
     try:
         with open(tmp, "w") as f:
             f.write(text)
         os.rename(tmp, TIME_FILE)
+        _last_time_text = text
     except Exception as e:
         log("time.txt schreiben fehlgeschlagen: %s" % e)
 
