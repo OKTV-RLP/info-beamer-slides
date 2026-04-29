@@ -346,23 +346,55 @@ end
 
 -- (Re)load des Audio-Streams. last_attempt wird gesetzt, sodass der
 -- Watchdog mit retry_after-Cooldown nicht in einer Loop landet.
+--
+-- Wir probieren mehrere Konfigurationen durch, weil weder `paused=true`
+-- noch `raw=true` für reine Audio-Streams offiziell dokumentiert sind
+-- und es je nach info-beamer-Build und Stream-Codec hakt. Erste
+-- erfolgreiche Variante gewinnt; bei totalem Fehlschlag werden alle
+-- Decoder-Fehler ins Log geschrieben, damit sich der echte Grund
+-- diagnostizieren lässt.
 local function load_audio_stream()
     audio_stream.last_attempt = sys.now()
-    local ok, r = pcall(resource.load_video, {
-        file   = audio_stream.url,
-        audio  = true,
-        raw    = true,
-        paused = true,    -- update_audio_routing entscheidet
-        looped = false,
-    })
-    if ok and r then
-        audio_stream.res = r
-        audio_stream.loaded_url = audio_stream.url
-    else
-        audio_stream.res = nil
-        audio_stream.loaded_url = nil
-        print("Audio-Stream nicht ladbar (Pi 4+ erforderlich): " ..
-              audio_stream.url)
+
+    local attempts = {
+        { raw = true,  paused = false, hint = "raw, auto-start" },
+        { raw = false, paused = false, hint = "non-raw (OMX), auto-start" },
+        { raw = true,  paused = true,  hint = "raw, paused" },
+        { raw = false, paused = true,  hint = "non-raw (OMX), paused" },
+    }
+
+    local errors = {}
+    for _, a in ipairs(attempts) do
+        local ok, r = pcall(resource.load_video, {
+            file   = audio_stream.url,
+            audio  = true,
+            looped = false,
+            raw    = a.raw,
+            paused = a.paused,
+        })
+        if ok and r then
+            -- paused=false hat den Stream auto-gestartet — kurz stummschalten,
+            -- damit update_audio_routing im nächsten Frame entscheidet.
+            if not a.paused then
+                pcall(function() r:stop() end)
+            end
+            audio_stream.res = r
+            audio_stream.loaded_url = audio_stream.url
+            audio_active = nil  -- Routing zur Neu-Evaluation zwingen.
+            print(string.format(
+                "Audio-Stream geladen [%s]: %s",
+                a.hint, audio_stream.url
+            ))
+            return
+        end
+        errors[#errors + 1] = string.format("[%s] %s", a.hint, tostring(r))
+    end
+
+    audio_stream.res = nil
+    audio_stream.loaded_url = nil
+    print("Audio-Stream konnte nicht geladen werden: " .. audio_stream.url)
+    for _, msg in ipairs(errors) do
+        print("  Fehler " .. msg)
     end
 end
 
