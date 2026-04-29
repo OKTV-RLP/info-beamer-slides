@@ -61,18 +61,16 @@ local time_overlay = {
     align     = "right",
 }
 
--- Optionales Cornerlogo. Zwei Modi:
---   * "positioned" (Default): kleines PNG in Originalgröße bei
---     (x, y) — pixelgenau, ressourcenschonend.
---   * "fullscreen": PNG in Display-Auflösung, Position kommt aus
---     der Transparenz im Bild selbst. Höherer Asset-/VRAM-Aufwand.
+-- Optionales Cornerlogo: PNG mit Alphakanal, in Originalgröße bei
+-- (x, y) gezeichnet. Vollformatige Logos (Display-Auflösung, Position
+-- via Transparenz im Bild) bei (0, 0) füllen automatisch den ganzen
+-- Bildschirm — daher kein separater "Vollbild-Modus" nötig.
 -- Wird IMMER zuletzt gezeichnet, liegt also auch im Backup-Zustand
 -- sichtbar oben drüber.
 local corner_logo = {
     enabled = false,
     res     = nil,
     file    = nil,
-    mode    = "positioned",
     x       = 0,
     y       = 0,
 }
@@ -466,7 +464,6 @@ util.file_watch("config.json", function(raw)
 
     -- Cornerlogo
     corner_logo.enabled = cfg.logo_enabled and true or false
-    corner_logo.mode    = cfg.logo_mode or "positioned"
     corner_logo.x       = tonumber(cfg.logo_x) or 0
     corner_logo.y       = tonumber(cfg.logo_y) or 0
     update_corner_logo(resolve_resource(cfg.logo_image))
@@ -602,17 +599,15 @@ end
 -- Cornerlogo zeichnen — wird IMMER zuletzt gezeichnet, also über
 -- Folien, Backup-Bild UND Zeit-Overlay. Bei Backup-Video liegt das
 -- Logo auf der GL-Surface oberhalb des raw-Videos.
+--
+-- Bild in Originalgröße bei (x, y) zeichnen. Vollformatige Logos
+-- (Display-Auflösung, Position via Transparenz) füllen bei (0, 0)
+-- automatisch den ganzen Bildschirm. image:size() liefert Pixelmaße;
+-- Fallback auf Vollbild, falls die Abfrage scheitert (z. B. Resource
+-- noch im "loading"-Zustand).
 local function draw_corner_logo()
     if not corner_logo.enabled or not corner_logo.res then return end
 
-    if corner_logo.mode == "fullscreen" then
-        corner_logo.res:draw(0, 0, WIDTH, HEIGHT, 1)
-        return
-    end
-
-    -- "positioned"-Modus: Originalgröße des Bildes bei (x, y) zeichnen.
-    -- image:size() liefert Pixelmaße; Fallback auf Vollbild, falls
-    -- die Abfrage scheitert (z. B. Resource noch im "loading"-Zustand).
     local ok, w, h = pcall(function() return corner_logo.res:size() end)
     if ok and type(w) == "number" and type(h) == "number" then
         local x, y = corner_logo.x, corner_logo.y
