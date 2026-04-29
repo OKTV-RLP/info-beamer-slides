@@ -410,21 +410,6 @@ function node.render()
 
     local fade_dur = math.max(0, CONFIG.fade_duration)
 
-    -- Zyklus-Crossfade: outgoing (letzte Folie alt) ausblenden, cur
-    -- (erste Folie neu) einblenden.
-    if outgoing then
-        local cycle_elapsed = t - cycle_fade_start
-        if fade_dur > 0 and cycle_elapsed < fade_dur then
-            local progress = cycle_elapsed / fade_dur
-            draw_fit(outgoing.res, 1)
-            draw_fit(cur.res, progress)
-            return
-        end
-        end_cycle_fade()
-    end
-
-    -- Normal-Flow inkl. Intra-Zyklus-Crossfade.
-    --
     -- Eine Folie muss mindestens fade_dur lang "current" sein, sonst
     -- bleibt fuer den Crossfade auf die naechste Folie keine Zeit. Bei
     -- duration=0 (oder duration < fade_dur) wuerde der Advance sofort
@@ -433,6 +418,12 @@ function node.render()
     -- spielt der Crossfade immer komplett.
     local cur_dur = math.max(cur.duration, fade_dur)
     local elapsed = t - slide_started
+
+    -- Advance ZUERST. Beim Zyklus-Ende setzt das outgoing — der
+    -- Cycle-Fade-Check muss DANACH laufen, damit die Crossfade direkt
+    -- im selben Frame anlaeuft. Sonst entstuende ein Single-Frame-
+    -- Flackern, in dem die naechste Folie kurz allein sichtbar ist,
+    -- bevor das Cycle-Crossfade im Folgeframe startet.
     if elapsed >= cur_dur then
         if current_idx >= #slides then
             -- Zyklus-Ende: outgoing erfassen, ggf. pending einsetzen.
@@ -451,6 +442,23 @@ function node.render()
         elapsed       = 0
     end
 
+    -- Zyklus-Crossfade: outgoing (letzte Folie alt) ausblenden, cur
+    -- (erste Folie neu) einblenden. Greift sowohl bei laufendem Fade
+    -- aus vorigen Frames als auch im Frame, in dem advance gerade
+    -- outgoing gesetzt hat (cycle_elapsed = 0 → progress = 0 →
+    -- outgoing voll sichtbar, cur unsichtbar — keine harte Folge).
+    if outgoing then
+        local cycle_elapsed = t - cycle_fade_start
+        if fade_dur > 0 and cycle_elapsed < fade_dur then
+            local progress = cycle_elapsed / fade_dur
+            draw_fit(outgoing.res, 1)
+            draw_fit(cur.res, progress)
+            return
+        end
+        end_cycle_fade()
+    end
+
+    -- Intra-Zyklus-Crossfade.
     local fade_at = cur_dur - fade_dur
     if fade_dur > 0 and elapsed >= fade_at and current_idx < #slides then
         local nxt      = slides[current_idx + 1]
