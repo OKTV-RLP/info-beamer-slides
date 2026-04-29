@@ -126,8 +126,8 @@
             "title": "Zeit-Schrift",
             "name": "time_font",
             "type": "font",
-            "optional": true,
-            "hint": "TTF/OTF-Asset. Ohne hochgeladene Schrift bleibt das Overlay aus."
+            "default": "DejaVuSans.ttf",
+            "hint": "TTF-Asset für die Zeit-Anzeige. Default ist die im Package gebündelte DejaVu Sans (gute deutsche Diakritika-Abdeckung)."
         },
         {
             "title": "Zeit-Schriftgröße (Pixel)",
