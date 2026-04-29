@@ -50,8 +50,9 @@ local background_slot = { res = nil, kind = nil, file = nil, label = "Hintergrun
 -- Asset; ohne Schrift wird das Overlay übersprungen.
 local time_overlay = {
     enabled   = false,
-    -- text wird vom service-Sidecar (mit korrekter Timezone) in
-    -- time.txt geschrieben und via util.file_watch eingespielt.
+    -- text wird vom service-Sidecar (mit korrekter Timezone) per
+    -- UDP-IPC zugestellt und via util.data_mapper{ time = … }
+    -- eingespielt. Kein Disk-IO.
     text      = "",
     locale    = "de",
     font_res  = nil,
@@ -558,7 +559,8 @@ util.file_watch("config.json", function(raw)
     update_media_slot(background_slot, cfg.background_media, nil)
 
     -- Zeit-Overlay (Format und Timezone liest der Python-Service;
-    -- Lua-Seite verarbeitet nur den fertigen Text aus time.txt).
+    -- Lua-Seite verarbeitet nur den fertigen Text aus dem
+    -- data_mapper-Handler).
     time_overlay.enabled = cfg.time_enabled and true or false
     time_overlay.size    = tonumber(cfg.time_size) or 80
     time_overlay.x       = tonumber(cfg.time_x)    or 1820
@@ -603,10 +605,13 @@ end)
 ------------------------------------------------------------
 
 -- Zeit-Text vom service-Sidecar (mit korrekter Timezone-Behandlung
--- via Python pytz). Wird ein Mal pro Sekunde aktualisiert.
-util.file_watch("time.txt", function(content)
-    time_overlay.text = content or ""
-end)
+-- via Python pytz). Per UDP-IPC zugestellt — keine SD-Writes.
+-- Path "time" matcht das vom Service gesendete "root/time:<text>".
+util.data_mapper{
+    time = function(msg)
+        time_overlay.text = msg or ""
+    end,
+}
 
 util.json_watch("manifest.json", function(m)
     if not m then return end

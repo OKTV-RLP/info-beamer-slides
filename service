@@ -24,6 +24,7 @@ import os
 import sys
 import json
 import time
+import socket
 import hashlib
 import traceback
 import datetime
@@ -35,7 +36,14 @@ import pytz
 SLIDE_PREFIX = "slide_"
 MANIFEST     = "manifest.json"
 CONFIG       = "config.json"
-TIME_FILE    = "time.txt"
+
+# UDP-IPC zu info-beamer auf dem Standard-Port. Wird fuer das Push
+# des Zeit-Texts an den Lua-Knoten verwendet, statt eine Datei auf
+# der SD-Karte zu schreiben (~86k Writes/Tag bei sekundengenauer
+# Anzeige würden die SD unnoetig belasten).
+IB_HOST   = "127.0.0.1"
+IB_PORT   = 4444
+_ipc_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 
 def log(msg):
@@ -102,20 +110,20 @@ def download_to(url, dest, verify, timeout):
 
 
 # ============================================================
-# Zeit-Overlay: schreibt time.txt im konfigurierten strftime-Format
-# unter Beruecksichtigung der konfigurierten Zeitzone. Lua liest die
-# Datei via util.file_watch — info-beamer hat bewusst keine
-# zuverlaessige Wall-Clock-API in Lua, daher die Aufgabenteilung.
+# Zeit-Overlay: berechnet den aktuellen Zeit-Text im konfigurierten
+# strftime-Format unter Beruecksichtigung der Timezone und schickt
+# ihn per UDP-IPC an den Lua-Knoten (data_mapper-Path "time"). info-
+# beamer hat bewusst keine zuverlaessige Wall-Clock-API in Lua, daher
+# die Aufgabenteilung.
 # ============================================================
 
 # Cache, um pytz.timezone() nicht in jeder Iteration neu aufzurufen
 # (das wuerde tzdata neu parsen).
 _tz_cache = {}
 
-# Letzter geschriebener time.txt-Inhalt — wir schreiben nur, wenn er
-# sich geaendert hat, um SD-Karten-Schreibzyklen zu sparen. Bei einem
-# Format wie %H:%M bedeutet das ~1 Write/Minute statt 1 Write/Sekunde
-# (60x weniger). Bei %H:%M:%S bleibt's allerdings bei 1 Write/Sekunde.
+# Letzter gesendeter Zeit-Text — wir senden nur, wenn er sich
+# geaendert hat. Bei %H:%M ergibt das ~1 IPC-Send/Minute statt
+# 1 Send/Sekunde — minimale Last, keine Disk-Writes.
 _last_time_text = None
 
 
@@ -135,11 +143,21 @@ def get_tz(name):
         return None
 
 
-def update_time_file(cfg):
+def push_time(text):
+    """Sendet den Zeit-Text per UDP an den info-beamer-Lua-Knoten
+    (data_mapper-Path 'time'). Kein Disk-IO, eine syscall, ~µs Latenz."""
+    payload = b"root/time:" + text.encode("utf-8")
+    try:
+        _ipc_sock.sendto(payload, (IB_HOST, IB_PORT))
+    except Exception as e:
+        log("Zeit-IPC fehlgeschlagen: %s" % e)
+
+
+def update_time(cfg):
     global _last_time_text
 
-    # Wenn das Overlay deaktiviert ist, brauchen wir gar nicht erst zu
-    # schreiben — Lua ignoriert time.txt in dem Fall ohnehin.
+    # Wenn das Overlay deaktiviert ist, schicken wir nichts — Lua
+    # zeichnet es ohnehin nicht.
     if not cfg.get("time_enabled"):
         return
 
@@ -159,36 +177,29 @@ def update_time_file(cfg):
         text = now.strftime(fmt)
     except Exception as e:
         log("strftime-Fehler (Format %r): %s" % (fmt, e))
-        text = ""
+        return
 
     if isinstance(text, bytes):
         text = text.decode("utf-8", "replace")
 
-    # Nur schreiben, wenn der Inhalt sich geaendert hat — schont die
-    # SD-Karte erheblich, weil bei minutengenauen Formaten wie %H:%M
-    # nur einmal pro Minute statt einmal pro Sekunde geschrieben wird.
+    # Dedup: nur senden wenn der Inhalt sich tatsaechlich geaendert
+    # hat. Bei %H:%M ergibt das ~1 Send/Minute statt 1 Send/Sekunde.
     if text == _last_time_text:
         return
 
-    tmp = TIME_FILE + ".tmp"
-    try:
-        with open(tmp, "w") as f:
-            f.write(text)
-        os.rename(tmp, TIME_FILE)
-        _last_time_text = text
-    except Exception as e:
-        log("time.txt schreiben fehlgeschlagen: %s" % e)
+    push_time(text)
+    _last_time_text = text
 
 
 def sleep_with_time_ticks(total_seconds):
-    """Schlaeft total_seconds, schreibt time.txt jede Sekunde neu —
-    sodass das Zeit-Overlay nicht erst nach poll_interval aktualisiert
-    wird. Re-loaded config jede Sekunde, damit Format-/Timezone-
-    Aenderungen latenzarm einschlagen."""
+    """Schlaeft total_seconds, pusht den Zeit-Text jede Sekunde via
+    UDP an den Lua-Knoten — sodass das Zeit-Overlay nicht erst nach
+    poll_interval aktualisiert wird. Re-loaded config jede Sekunde,
+    damit Format-/Timezone-Aenderungen latenzarm einschlagen."""
     end = time.time() + total_seconds
     while True:
         cfg = load_config()
-        update_time_file(cfg)
+        update_time(cfg)
         remaining = end - time.time()
         if remaining <= 0:
             return
@@ -204,7 +215,7 @@ def main():
             cfg = load_config()
             # Zeit jede Hauptiteration auch frisch schreiben (zusaetzlich
             # zum 1-Hz-Tick im sleep_with_time_ticks).
-            update_time_file(cfg)
+            update_time(cfg)
             playlist_url   = (cfg.get("playlist_url")    or "").strip()
             base_url       = (cfg.get("folien_base_url") or "").strip()
             default_dur    = int(cfg.get("default_duration") or 10)
