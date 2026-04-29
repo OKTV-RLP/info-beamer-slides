@@ -121,11 +121,6 @@ def download_to(url, dest, verify, timeout):
 # (das wuerde tzdata neu parsen).
 _tz_cache = {}
 
-# Letzter gesendeter Zeit-Text — wir senden nur, wenn er sich
-# geaendert hat. Bei %H:%M ergibt das ~1 IPC-Send/Minute statt
-# 1 Send/Sekunde — minimale Last, keine Disk-Writes.
-_last_time_text = None
-
 
 def get_tz(name):
     if not name:
@@ -154,8 +149,6 @@ def push_time(text):
 
 
 def update_time(cfg):
-    global _last_time_text
-
     # Wenn das Overlay deaktiviert ist, schicken wir nichts — Lua
     # zeichnet es ohnehin nicht.
     if not cfg.get("time_enabled"):
@@ -182,13 +175,13 @@ def update_time(cfg):
     if isinstance(text, bytes):
         text = text.decode("utf-8", "replace")
 
-    # Dedup: nur senden wenn der Inhalt sich tatsaechlich geaendert
-    # hat. Bei %H:%M ergibt das ~1 Send/Minute statt 1 Send/Sekunde.
-    if text == _last_time_text:
-        return
-
+    # Jede Sekunde pushen, auch wenn sich der Text nicht geaendert
+    # hat. Sonst koennte ein gerade neu gestarteter Lua-Knoten bei
+    # einem Format wie %H:%M bis zu einer Minute warten, bis der
+    # naechste Minutenwechsel den naechsten Send ausloest. Mit
+    # 1 Hz-Heartbeat hat Lua spaetestens nach 1 s einen frischen
+    # Wert — UDP-Loopback ist quasi kostenlos.
     push_time(text)
-    _last_time_text = text
 
 
 def sleep_with_time_ticks(total_seconds):
