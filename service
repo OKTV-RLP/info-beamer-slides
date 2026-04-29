@@ -26,13 +26,16 @@ import json
 import time
 import hashlib
 import traceback
+import datetime
 
 import requests
 import urllib3
+import pytz
 
 SLIDE_PREFIX = "slide_"
 MANIFEST     = "manifest.json"
 CONFIG       = "config.json"
+TIME_FILE    = "time.txt"
 
 
 def log(msg):
@@ -98,6 +101,80 @@ def download_to(url, dest, verify, timeout):
     os.rename(tmp, dest)
 
 
+# ============================================================
+# Zeit-Overlay: schreibt time.txt im konfigurierten strftime-Format
+# unter Beruecksichtigung der konfigurierten Zeitzone. Lua liest die
+# Datei via util.file_watch — info-beamer hat bewusst keine
+# zuverlaessige Wall-Clock-API in Lua, daher die Aufgabenteilung.
+# ============================================================
+
+# Cache, um pytz.timezone() nicht in jeder Iteration neu aufzurufen
+# (das wuerde tzdata neu parsen).
+_tz_cache = {}
+
+
+def get_tz(name):
+    if not name:
+        return None  # Fallback auf Systemzeit
+    cached = _tz_cache.get(name)
+    if cached is not None:
+        return cached
+    try:
+        tz = pytz.timezone(name)
+        _tz_cache[name] = tz
+        return tz
+    except Exception:
+        log("Unbekannte Zeitzone: %r — verwende Systemzeit." % name)
+        _tz_cache[name] = False
+        return None
+
+
+def update_time_file(cfg):
+    fmt = cfg.get("time_format") or "%H:%M"
+    tz_name = (cfg.get("time_timezone") or "").strip()
+
+    tz = get_tz(tz_name) if tz_name else None
+    if tz is False:  # bereits als ungueltig markiert
+        tz = None
+
+    if tz is not None:
+        now = datetime.datetime.now(tz)
+    else:
+        now = datetime.datetime.now()
+
+    try:
+        text = now.strftime(fmt)
+    except Exception as e:
+        log("strftime-Fehler (Format %r): %s" % (fmt, e))
+        text = ""
+
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", "replace")
+
+    tmp = TIME_FILE + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            f.write(text)
+        os.rename(tmp, TIME_FILE)
+    except Exception as e:
+        log("time.txt schreiben fehlgeschlagen: %s" % e)
+
+
+def sleep_with_time_ticks(total_seconds):
+    """Schlaeft total_seconds, schreibt time.txt jede Sekunde neu —
+    sodass das Zeit-Overlay nicht erst nach poll_interval aktualisiert
+    wird. Re-loaded config jede Sekunde, damit Format-/Timezone-
+    Aenderungen latenzarm einschlagen."""
+    end = time.time() + total_seconds
+    while True:
+        cfg = load_config()
+        update_time_file(cfg)
+        remaining = end - time.time()
+        if remaining <= 0:
+            return
+        time.sleep(min(1.0, max(0.1, remaining)))
+
+
 def main():
     last_manifest_hash = None
     insecure_warning_active = False
@@ -105,6 +182,9 @@ def main():
     while True:
         try:
             cfg = load_config()
+            # Zeit jede Hauptiteration auch frisch schreiben (zusaetzlich
+            # zum 1-Hz-Tick im sleep_with_time_ticks).
+            update_time_file(cfg)
             playlist_url   = (cfg.get("playlist_url")    or "").strip()
             base_url       = (cfg.get("folien_base_url") or "").strip()
             default_dur    = int(cfg.get("default_duration") or 10)
@@ -125,7 +205,7 @@ def main():
 
             if not playlist_url or not base_url:
                 log("playlist_url oder folien_base_url nicht konfiguriert.")
-                time.sleep(retry_interval)
+                sleep_with_time_ticks(retry_interval)
                 continue
 
             if not base_url.endswith("/"):
@@ -138,7 +218,7 @@ def main():
                 playlist_text = r.text
             except Exception as e:
                 log("Playlist-Fetch fehlgeschlagen: %s" % e)
-                time.sleep(retry_interval)
+                sleep_with_time_ticks(retry_interval)
                 continue
 
             entries = parse_m3u8(playlist_text, default_dur)
@@ -148,7 +228,7 @@ def main():
                     write_manifest([])
                     last_manifest_hash = "EMPTY"
                     log("Playlist leer.")
-                time.sleep(retry_interval)
+                sleep_with_time_ticks(retry_interval)
                 continue
 
             # Fehlende Folien herunterladen. Filenames sind content-
@@ -196,7 +276,7 @@ def main():
 
             if not available:
                 log("Keine Folie ladbar.")
-                time.sleep(retry_interval)
+                sleep_with_time_ticks(retry_interval)
                 continue
 
             # Hash ueber tatsaechlich verfuegbare Folien — auch bei
@@ -210,13 +290,13 @@ def main():
                 last_manifest_hash = available_hash
                 log("Manifest aktualisiert: %d Folien." % len(available))
 
-            time.sleep(poll_interval)
+            sleep_with_time_ticks(poll_interval)
         except KeyboardInterrupt:
             log("beendet.")
             return
         except Exception:
             log("Unerwarteter Fehler:\n%s" % traceback.format_exc())
-            time.sleep(5)
+            sleep_with_time_ticks(5)
 
 
 if __name__ == "__main__":

@@ -50,7 +50,9 @@ local background_slot = { res = nil, kind = nil, file = nil, label = "Hintergrun
 -- Asset; ohne Schrift wird das Overlay übersprungen.
 local time_overlay = {
     enabled   = false,
-    format    = "%H:%M",
+    -- text wird vom service-Sidecar (mit korrekter Timezone) in
+    -- time.txt geschrieben und via util.file_watch eingespielt.
+    text      = "",
     locale    = "de",
     font_res  = nil,
     font_file = nil,
@@ -555,11 +557,9 @@ util.file_watch("config.json", function(raw)
     update_media_slot(backup_slot,     cfg.backup_media,     "empty.png")
     update_media_slot(background_slot, cfg.background_media, nil)
 
-    -- Zeit-Overlay
+    -- Zeit-Overlay (Format und Timezone liest der Python-Service;
+    -- Lua-Seite verarbeitet nur den fertigen Text aus time.txt).
     time_overlay.enabled = cfg.time_enabled and true or false
-    time_overlay.format  = (type(cfg.time_format) == "string"
-                            and cfg.time_format ~= "")
-                           and cfg.time_format or "%H:%M"
     time_overlay.size    = tonumber(cfg.time_size) or 80
     time_overlay.x       = tonumber(cfg.time_x)    or 1820
     time_overlay.y       = tonumber(cfg.time_y)    or 980
@@ -601,6 +601,12 @@ end)
 ------------------------------------------------------------
 -- Manifest-Watch (vom Python-Service geschrieben)
 ------------------------------------------------------------
+
+-- Zeit-Text vom service-Sidecar (mit korrekter Timezone-Behandlung
+-- via Python pytz). Wird ein Mal pro Sekunde aktualisiert.
+util.file_watch("time.txt", function(content)
+    time_overlay.text = content or ""
+end)
 
 util.json_watch("manifest.json", function(m)
     if not m then return end
@@ -691,33 +697,45 @@ end
 -- Zeit-Overlay zeichnen (wenn aktiviert und Schrift verfügbar). Nur
 -- im PLAYING-Zustand aufgerufen; im IDLE-Zustand bleibt das Overlay
 -- aus, damit der Backup-Inhalt klar dominiert.
+--
+-- Mehrzeilige Formate (\n im strftime-Format) werden auf einzelne
+-- Zeilen aufgeteilt und untereinander mit Zeilenhöhe = Schriftgröße
+-- gerendert. Die Ausrichtung gilt pro Zeile relativ zu time_x.
 local function draw_time_overlay()
     if not time_overlay.enabled then return end
     local font = time_overlay.font_res
     if not font then return end
 
-    local ok_t, text = pcall(os.date, time_overlay.format)
-    if not ok_t or type(text) ~= "string" or text == "" then return end
+    local text = time_overlay.text
+    if type(text) ~= "string" or text == "" then return end
 
     if time_overlay.locale == "de" then
         text = localize_de(text)
     end
 
-    local x = time_overlay.x
-    if time_overlay.align == "right" or time_overlay.align == "center" then
-        local ok_w, w = pcall(function()
-            return font:width(text, time_overlay.size)
-        end)
-        if ok_w and type(w) == "number" then
-            x = (time_overlay.align == "right") and (x - w) or (x - w / 2)
-        end
+    local lines = {}
+    for line in text:gmatch("[^\r\n]+") do
+        lines[#lines + 1] = line
     end
+    if #lines == 0 then return end
 
-    local c = time_overlay.color
-    pcall(function()
-        font:write(x, time_overlay.y, text, time_overlay.size,
-                   c.r, c.g, c.b, c.a)
-    end)
+    local size       = time_overlay.size
+    local line_height = size  -- 1.0 line-height; ggf. später konfigurierbar
+    local c          = time_overlay.color
+
+    for i, line in ipairs(lines) do
+        local x = time_overlay.x
+        if time_overlay.align == "right" or time_overlay.align == "center" then
+            local ok_w, w = pcall(function() return font:width(line, size) end)
+            if ok_w and type(w) == "number" then
+                x = (time_overlay.align == "right") and (x - w) or (x - w / 2)
+            end
+        end
+        local y = time_overlay.y + (i - 1) * line_height
+        pcall(function()
+            font:write(x, y, line, size, c.r, c.g, c.b, c.a)
+        end)
+    end
 end
 
 -- Cornerlogo zeichnen — wird IMMER zuletzt gezeichnet, also über
