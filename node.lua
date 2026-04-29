@@ -92,8 +92,24 @@ local pending_slides = nil    -- nächste Liste, swap am Zyklus-Ende
 local outgoing         = nil   -- nil oder {res, dispose_after}
 local cycle_fade_start = 0
 
--- Audio-Routing-Status: "background" | "backup" | nil
+-- Audio-Routing-Status: "background" | "backup" | "stream" | nil
 local audio_active = nil
+
+-- Optionaler HTTP-/Icecast-Audio-Stream. Wird via resource.load_video
+-- geladen (info-beamer hosted unterstützt HTTP/HTTPS/HLS/UDP/RTP über
+-- INFOBEAMER_STREAMING=1, in Hosted-Setups Standard). raw=true legt
+-- den Stream in die GL-Pipeline; da wir nie :place aufrufen, gibt's
+-- keinen sichtbaren Output — aber der Audio-Track läuft. Ein einfacher
+-- Watchdog disposed bei "error"/"finished" und erlaubt einen Re-Connect
+-- nach retry_after Sekunden.
+local audio_stream = {
+    enabled      = false,
+    url          = "",
+    res          = nil,
+    loaded_url   = nil,
+    last_attempt = -math.huge,
+    retry_after  = 5,
+}
 
 ------------------------------------------------------------
 -- Hilfsfunktionen
@@ -328,11 +344,72 @@ local function video_play(slot)
     end
 end
 
+-- (Re)load des Audio-Streams. last_attempt wird gesetzt, sodass der
+-- Watchdog mit retry_after-Cooldown nicht in einer Loop landet.
+local function load_audio_stream()
+    audio_stream.last_attempt = sys.now()
+    local ok, r = pcall(resource.load_video, {
+        file   = audio_stream.url,
+        audio  = true,
+        raw    = true,
+        paused = true,    -- update_audio_routing entscheidet
+        looped = false,
+    })
+    if ok and r then
+        audio_stream.res = r
+        audio_stream.loaded_url = audio_stream.url
+    else
+        audio_stream.res = nil
+        audio_stream.loaded_url = nil
+        print("Audio-Stream nicht ladbar (Pi 4+ erforderlich): " ..
+              audio_stream.url)
+    end
+end
+
+-- Wird pro Frame aufgerufen. Disposed den Stream, wenn er deaktiviert,
+-- die URL geändert oder der Decoder in "error"/"finished" gelandet ist;
+-- lädt ihn neu, sobald die Cooldown-Periode (retry_after) abgelaufen ist.
+local function check_audio_stream_health()
+    if not audio_stream.enabled or audio_stream.url == "" then
+        if audio_stream.res then
+            pcall(function() audio_stream.res:dispose() end)
+            audio_stream.res = nil
+            audio_stream.loaded_url = nil
+        end
+        return
+    end
+
+    -- URL hat sich seit dem Load geändert → bestehenden Stream killen.
+    if audio_stream.res and audio_stream.loaded_url ~= audio_stream.url then
+        pcall(function() audio_stream.res:dispose() end)
+        audio_stream.res = nil
+    end
+
+    -- Health-Check.
+    if audio_stream.res then
+        local ok, st = pcall(function() return audio_stream.res:state() end)
+        if ok and (st == "error" or st == "finished") then
+            print("Audio-Stream " .. tostring(st) ..
+                  " — Reconnect in " .. audio_stream.retry_after .. " s")
+            pcall(function() audio_stream.res:dispose() end)
+            audio_stream.res = nil
+        end
+    end
+
+    -- (Re)load nach Cooldown.
+    if not audio_stream.res
+       and sys.now() - audio_stream.last_attempt >= audio_stream.retry_after then
+        load_audio_stream()
+    end
+end
+
 local function update_audio_routing()
     local target
     if state == STATE_IDLE
        and backup_slot.kind == "video" and backup_slot.res then
         target = "backup"
+    elseif audio_stream.enabled and audio_stream.res then
+        target = "stream"
     elseif background_slot.kind == "video" and background_slot.res then
         target = "background"
     else
@@ -341,16 +418,22 @@ local function update_audio_routing()
 
     if target == audio_active then return end
 
+    -- Aktive Quelle stoppen.
     if audio_active == "background" then
         video_pause(background_slot)
     elseif audio_active == "backup" then
         video_pause(backup_slot)
+    elseif audio_active == "stream" and audio_stream.res then
+        pcall(function() audio_stream.res:stop() end)
     end
 
+    -- Neue Quelle starten.
     if target == "background" then
         video_play(background_slot)
     elseif target == "backup" then
         video_play(backup_slot)
+    elseif target == "stream" and audio_stream.res then
+        pcall(function() audio_stream.res:start() end)
     end
 
     audio_active = target
@@ -467,6 +550,11 @@ util.file_watch("config.json", function(raw)
     corner_logo.x       = tonumber(cfg.logo_x) or 0
     corner_logo.y       = tonumber(cfg.logo_y) or 0
     update_corner_logo(resolve_resource(cfg.logo_image))
+
+    -- Audio-Stream (Icecast/HTTP). check_audio_stream_health im Render
+    -- erkennt URL-Änderungen und lädt entsprechend neu.
+    audio_stream.enabled = cfg.audio_stream_enabled and true or false
+    audio_stream.url     = cfg.audio_stream_url or ""
 
     -- Slot-Wechsel können das Audio-Ziel verändern (Disposal des
     -- aktiven Videos). Routing-Stand zurücksetzen, damit der nächste
@@ -618,6 +706,7 @@ local function draw_corner_logo()
 end
 
 function node.render()
+    check_audio_stream_health()
     update_audio_routing()
 
     local t = now()

@@ -214,6 +214,24 @@
             "type": "integer",
             "default": 0,
             "hint": "Pixel von oben (obere Kante des Bildschirms)."
+        },
+        {
+            "title": "Hintergrund-Audio (Stream)",
+            "type": "section",
+            "intro": "Optionaler HTTP-/Icecast-Stream. Priorität: Backup-Video-Audio > Stream > Hintergrund-Video-Audio. Pi 4+ erforderlich."
+        },
+        {
+            "title": "Hintergrund-Audio aktivieren",
+            "name": "audio_stream_enabled",
+            "type": "boolean",
+            "default": false
+        },
+        {
+            "title": "Stream-URL",
+            "name": "audio_stream_url",
+            "type": "string",
+            "default": "",
+            "hint": "z.B. http://stream.example.com:8000/radio.mp3. MP3-Icecast-Streams sind am zuverlässigsten. Stream wird bei Verbindungsabbruch automatisch neu verbunden."
         }
     ]
 }
