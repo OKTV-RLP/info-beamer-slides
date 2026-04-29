@@ -35,8 +35,14 @@ local CONFIG = {
     default_duration = 10,
 }
 
-local backup_slot     = { res = nil, kind = nil, file = nil, label = "Backup-Inhalt" }
-local background_slot = { res = nil, kind = nil, file = nil, label = "Hintergrund-Inhalt" }
+-- Raw-Videos rendern in info-beamer auf einer eigenen Ebene außerhalb
+-- der GL-Pipeline. layer < 0 platziert das Video HINTER der GL-Surface,
+-- sodass transparente Folien-Pixel via gl.clear(_, _, _, 0) und
+-- transparenten Folien-PNG-Bereichen das Video durchscheinen lassen.
+-- Backup auf höherer (= weniger negativer) Ebene als Background, damit
+-- es im IDLE-Zustand das Hintergrund-Video überdeckt.
+local backup_slot     = { res = nil, kind = nil, file = nil, label = "Backup-Inhalt",     layer = -1 }
+local background_slot = { res = nil, kind = nil, file = nil, label = "Hintergrund-Inhalt", layer = -2 }
 
 ------------------------------------------------------------
 -- Player-State
@@ -230,6 +236,11 @@ local function update_media_slot(slot, cfg_value, default_name)
     local ok, r = load_media(name, kind)
     if ok and r then
         slot.res, slot.kind = r, kind
+        -- raw-Video hinter die GL-Surface legen, damit transparente
+        -- Folien-Pixel das Video durchscheinen lassen können.
+        if kind == "video" and slot.layer ~= nil then
+            pcall(function() r:layer(slot.layer) end)
+        end
     else
         local hint = (kind == "video") and " (Video-Loop benötigt Pi 4+)" or ""
         print(slot.label .. " nicht ladbar: " .. name .. hint)
@@ -337,18 +348,41 @@ local function draw_slot(slot, alpha)
     end
 end
 
+-- Verstecke ein Video durch :place auf ein 0×0-Rechteck — info-beamer
+-- behält sonst die letzte Platzierung bei und das Video bliebe sichtbar.
+local function hide_video(slot)
+    if slot.kind == "video" and slot.res then
+        pcall(function() slot.res:place(0, 0, 0, 0) end)
+    end
+end
+
 function node.render()
     update_audio_routing()
 
     local t = now()
-    gl.clear(0, 0, 0, 1)
-
-    -- Hintergrund (Bild oder Video) unter alles legen, sodass
-    -- transparente Folien (PNG mit Alphakanal) durchscheinen lassen.
-    draw_slot(background_slot, 1)
+    -- Transparent clearen, damit raw-Videos auf negativen Layers durch
+    -- transparente Folien-Pixel hindurchscheinen können. Wo nichts auf
+    -- der GL-Surface gezeichnet wird, ist sie durchsichtig — und gibt
+    -- den Blick auf die Video-Ebenen darunter frei.
+    gl.clear(0, 0, 0, 0)
 
     if state == STATE_IDLE then
-        draw_slot(backup_slot, 1)
+        if backup_slot.kind == "video" and backup_slot.res then
+            -- Backup-Video übernimmt voll: das Video liegt auf Layer -1
+            -- hinter der (transparenten) GL-Surface und überdeckt das
+            -- Hintergrund-Video auf Layer -2. Wir zeichnen weder
+            -- Hintergrund-Bild noch sonst etwas auf GL, damit das
+            -- Backup-Video sichtbar bleibt.
+            pcall(function() backup_slot.res:place(0, 0, WIDTH, HEIGHT) end)
+        else
+            -- Backup-Bild (oder leerer Slot): Hintergrund zuerst,
+            -- danach Backup-Bild darüber. Bei transparenten Pixeln
+            -- des Backup-Bildes scheint der Hintergrund durch.
+            draw_slot(background_slot, 1)
+            if backup_slot.kind == "image" and backup_slot.res then
+                backup_slot.res:draw(0, 0, WIDTH, HEIGHT, 1)
+            end
+        end
         return
     end
 
@@ -363,6 +397,16 @@ function node.render()
         state = STATE_IDLE
         return
     end
+
+    -- Hintergrund: Video :place auf Layer -2 (durchscheinend hinter
+    -- transparenten Folien-Pixeln), Bild direkt auf GL (von Folien
+    -- überdeckt, scheint durch transparente Folien-Pixel hindurch).
+    draw_slot(background_slot, 1)
+
+    -- Backup-Video off-screen verstecken — sonst würde sein Standbild
+    -- auf Layer -1 das Hintergrund-Video durch die transparenten
+    -- Folien-Pixel hindurch überdecken.
+    hide_video(backup_slot)
 
     local fade_dur = math.max(0, CONFIG.fade_duration)
 
