@@ -198,8 +198,8 @@
             "valid": [
                 "image"
             ],
-            "optional": true,
-            "hint": "PNG mit Alphakanal. Im Modus 'positioniert' kann das Asset in Originalgröße geliefert werden; im Modus 'Vollbild' muss es Display-Auflösung haben."
+            "default": "1x1trans.png",
+            "hint": "PNG mit Alphakanal. Im Modus 'positioniert' kann das Asset in Originalgröße geliefert werden; im Modus 'Vollbild' muss es Display-Auflösung haben. Default ist ein 1×1-transparentes PNG (faktisch unsichtbar) — wer das Cornerlogo nutzen will, lädt sein eigenes Asset hoch."
         },
         {
             "title": "Cornerlogo-Modus",
