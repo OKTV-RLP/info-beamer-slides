@@ -127,6 +127,71 @@ local function dispose_list(list)
 end
 
 ------------------------------------------------------------
+-- Crossfade-Shader (prämultiplizierte-Alpha-Lerp)
+------------------------------------------------------------
+-- Standard-Alphablending mit zwei :draw-Aufrufen produziert keine
+-- saubere Lerp zwischen zwei RGBA-Texturen — zweiter Draw = src*p +
+-- (1-p) * (1-p)*A statt p*B + (1-p)*A. Die Folge: an Stellen, wo
+-- Folie A opak und Folie B transparent ist (oder umgekehrt), gibt es
+-- entweder einen abrupten Wechsel am Fade-Ende oder ein Helligkeits-
+-- Loch in der Mitte des Fades.
+--
+-- Lösung: fragment-shader, der beide Texturen sampelt, in
+-- prämultipliziertem Alpha-Raum lerpt (sodass transparente Pixel
+-- wirklich keinen Color-Beitrag haben) und das Ergebnis als
+-- straight-alpha herausgibt. Der nachgelagerte Standard-Composite
+-- über den Hintergrund-Layer ist dann mathematisch korrekt für
+-- alle Transparenz-Kombinationen.
+
+local crossfade_shader
+do
+    local ok, sh = pcall(resource.create_shader, [[
+        uniform sampler2D from_tex;
+        uniform sampler2D to_tex;
+        uniform float progress;
+        varying vec2 TexCoord;
+        void main() {
+            vec4 a = texture2D(from_tex, TexCoord);
+            vec4 b = texture2D(to_tex,   TexCoord);
+            vec4 a_pre = vec4(a.rgb * a.a, a.a);
+            vec4 b_pre = vec4(b.rgb * b.a, b.a);
+            vec4 r_pre = mix(a_pre, b_pre, progress);
+            if (r_pre.a > 0.0) {
+                gl_FragColor = vec4(r_pre.rgb / r_pre.a, r_pre.a);
+            } else {
+                gl_FragColor = vec4(0.0);
+            }
+        }
+    ]])
+    if ok then
+        crossfade_shader = sh
+    else
+        print("Crossfade-Shader konnte nicht kompiliert werden — fallback auf zwei-Draw-Compositing mit leichten Artefakten an Transparenz-Kanten.")
+    end
+end
+
+-- Mathematisch sauberer Crossfade zwischen zwei Folien-Ressourcen.
+-- Die Geometrie kommt vom :draw der ersten Textur, der Shader
+-- ersetzt jedoch die Fragment-Farbe — beide Texturen werden über
+-- die Uniforms gesampelt.
+local function draw_crossfade(from_res, to_res, progress)
+    if not from_res or not to_res then return end
+    if crossfade_shader then
+        crossfade_shader:use{
+            from_tex = from_res,
+            to_tex   = to_res,
+            progress = progress,
+        }
+        from_res:draw(0, 0, WIDTH, HEIGHT)
+        crossfade_shader:deactivate()
+    else
+        -- Fallback (Compositing-Artefakte an Transparenz-Kanten).
+        from_res:draw(0, 0, WIDTH, HEIGHT, 1)
+        to_res:draw(0, 0, WIDTH, HEIGHT, progress)
+    end
+end
+
+------------------------------------------------------------
 -- Audio-Routing
 ------------------------------------------------------------
 -- info-beamer setzt audio=true beim Laden — runtime gibt's keinen
@@ -451,8 +516,7 @@ function node.render()
         local cycle_elapsed = t - cycle_fade_start
         if fade_dur > 0 and cycle_elapsed < fade_dur then
             local progress = cycle_elapsed / fade_dur
-            draw_fit(outgoing.res, 1)
-            draw_fit(cur.res, progress)
+            draw_crossfade(outgoing.res, cur.res, progress)
             return
         end
         end_cycle_fade()
@@ -463,8 +527,7 @@ function node.render()
     if fade_dur > 0 and elapsed >= fade_at and current_idx < #slides then
         local nxt      = slides[current_idx + 1]
         local progress = math.min(1, (elapsed - fade_at) / fade_dur)
-        draw_fit(cur.res, 1)
-        draw_fit(nxt.res, progress)
+        draw_crossfade(cur.res, nxt.res, progress)
     else
         draw_fit(cur.res, 1)
     end
