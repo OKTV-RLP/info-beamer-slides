@@ -44,6 +44,39 @@ local CONFIG = {
 local backup_slot     = { res = nil, kind = nil, file = nil, label = "Backup-Inhalt",     layer = -1 }
 local background_slot = { res = nil, kind = nil, file = nil, label = "Hintergrund-Inhalt", layer = -2 }
 
+-- Optionales Zeit-Overlay. Wird im PLAYING-Zustand über den Folien
+-- gezeichnet, im IDLE-Zustand vom Backup-Layer überdeckt (durch
+-- Render-Reihenfolge). Erfordert ein per Setup hochgeladenes Font-
+-- Asset; ohne Schrift wird das Overlay übersprungen.
+local time_overlay = {
+    enabled   = false,
+    format    = "%H:%M",
+    locale    = "de",
+    font_res  = nil,
+    font_file = nil,
+    size      = 80,
+    color     = { r = 1, g = 1, b = 1, a = 1 },
+    x         = 1820,
+    y         = 980,
+    align     = "right",
+}
+
+-- Optionales Cornerlogo. Zwei Modi:
+--   * "positioned" (Default): kleines PNG in Originalgröße bei
+--     (x, y) — pixelgenau, ressourcenschonend.
+--   * "fullscreen": PNG in Display-Auflösung, Position kommt aus
+--     der Transparenz im Bild selbst. Höherer Asset-/VRAM-Aufwand.
+-- Wird IMMER zuletzt gezeichnet, liegt also auch im Backup-Zustand
+-- sichtbar oben drüber.
+local corner_logo = {
+    enabled = false,
+    res     = nil,
+    file    = nil,
+    mode    = "positioned",
+    x       = 0,
+    y       = 0,
+}
+
 ------------------------------------------------------------
 -- Player-State
 ------------------------------------------------------------
@@ -123,6 +156,92 @@ local function dispose_list(list)
         if s.res then
             pcall(function() s.res:dispose() end)
         end
+    end
+end
+
+-- Englische Wochentag-/Monatsnamen durch deutsche ersetzen. Wird auf
+-- die Ausgabe von os.date() angewendet, weil info-beamer-Lua mit
+-- C-Locale läuft (=> englische %A/%B/%a/%b). Frontier-Patterns
+-- (%f[%a]…%f[%A]) sorgen für Wortgrenzen — sonst würde "Mon" im
+-- bereits ersetzten "Montag" wieder zu "Mo" werden.
+--
+-- Reihenfolge: vollständige Namen ZUERST, dann Abkürzungen. Sonst
+-- könnte z. B. "Mar" das "Mar"-Präfix von "March" ersetzen, bevor
+-- die volle Form drankommt.
+local DE_REPLACEMENTS = {
+    -- Vollständige Wochentage
+    {"Wednesday", "Mittwoch"},
+    {"Thursday",  "Donnerstag"},
+    {"Saturday",  "Samstag"},
+    {"Tuesday",   "Dienstag"},
+    {"Monday",    "Montag"},
+    {"Friday",    "Freitag"},
+    {"Sunday",    "Sonntag"},
+    -- Vollständige Monate
+    {"September", "September"},
+    {"February",  "Februar"},
+    {"November",  "November"},
+    {"December",  "Dezember"},
+    {"October",   "Oktober"},
+    {"January",   "Januar"},
+    {"August",    "August"},
+    {"March",     "März"},
+    {"April",     "April"},
+    {"June",      "Juni"},
+    {"July",      "Juli"},
+    -- Abgekürzte Wochentage
+    {"Mon", "Mo"},
+    {"Tue", "Di"},
+    {"Wed", "Mi"},
+    {"Thu", "Do"},
+    {"Fri", "Fr"},
+    {"Sat", "Sa"},
+    {"Sun", "So"},
+    -- Abgekürzte Monate (nur die, die sich vom Englischen unterscheiden)
+    {"Mar", "Mär"},
+    {"May", "Mai"},
+    {"Oct", "Okt"},
+    {"Dec", "Dez"},
+}
+
+local function localize_de(text)
+    for _, pair in ipairs(DE_REPLACEMENTS) do
+        text = text:gsub("%f[%a]" .. pair[1] .. "%f[%A]", pair[2])
+    end
+    return text
+end
+
+-- Zeit-Overlay-Schrift bei Asset-Wechsel neu laden.
+local function update_time_font(name)
+    if name == time_overlay.font_file then return end
+    if time_overlay.font_res then
+        pcall(function() time_overlay.font_res:dispose() end)
+    end
+    time_overlay.font_res  = nil
+    time_overlay.font_file = name
+    if not name then return end
+    local ok, f = pcall(resource.load_font, name)
+    if ok and f then
+        time_overlay.font_res = f
+    else
+        print("Zeit-Schrift nicht ladbar: " .. name)
+    end
+end
+
+-- Cornerlogo-Asset bei Wechsel neu laden.
+local function update_corner_logo(name)
+    if name == corner_logo.file then return end
+    if corner_logo.res then
+        pcall(function() corner_logo.res:dispose() end)
+    end
+    corner_logo.res  = nil
+    corner_logo.file = name
+    if not name then return end
+    local ok, r = pcall(resource.load_image, {file = name})
+    if ok and r then
+        corner_logo.res = r
+    else
+        print("Cornerlogo nicht ladbar: " .. name)
     end
 end
 
@@ -325,6 +444,33 @@ util.file_watch("config.json", function(raw)
     update_media_slot(backup_slot,     cfg.backup_media,     "empty.png")
     update_media_slot(background_slot, cfg.background_media, nil)
 
+    -- Zeit-Overlay
+    time_overlay.enabled = cfg.time_enabled and true or false
+    time_overlay.format  = (type(cfg.time_format) == "string"
+                            and cfg.time_format ~= "")
+                           and cfg.time_format or "%H:%M"
+    time_overlay.size    = tonumber(cfg.time_size) or 80
+    time_overlay.x       = tonumber(cfg.time_x)    or 1820
+    time_overlay.y       = tonumber(cfg.time_y)    or 980
+    time_overlay.align   = cfg.time_align or "right"
+    time_overlay.locale  = cfg.time_locale or "de"
+    if type(cfg.time_color) == "table" then
+        time_overlay.color = {
+            r = tonumber(cfg.time_color.r) or 1,
+            g = tonumber(cfg.time_color.g) or 1,
+            b = tonumber(cfg.time_color.b) or 1,
+            a = tonumber(cfg.time_color.a) or 1,
+        }
+    end
+    update_time_font(resolve_resource(cfg.time_font))
+
+    -- Cornerlogo
+    corner_logo.enabled = cfg.logo_enabled and true or false
+    corner_logo.mode    = cfg.logo_mode or "positioned"
+    corner_logo.x       = tonumber(cfg.logo_x) or 0
+    corner_logo.y       = tonumber(cfg.logo_y) or 0
+    update_corner_logo(resolve_resource(cfg.logo_image))
+
     -- Slot-Wechsel können das Audio-Ziel verändern (Disposal des
     -- aktiven Videos). Routing-Stand zurücksetzen, damit der nächste
     -- Render-Frame frisch entscheidet.
@@ -421,6 +567,61 @@ local function hide_video(slot)
     end
 end
 
+-- Zeit-Overlay zeichnen (wenn aktiviert und Schrift verfügbar). Nur
+-- im PLAYING-Zustand aufgerufen; im IDLE-Zustand bleibt das Overlay
+-- aus, damit der Backup-Inhalt klar dominiert.
+local function draw_time_overlay()
+    if not time_overlay.enabled then return end
+    local font = time_overlay.font_res
+    if not font then return end
+
+    local ok_t, text = pcall(os.date, time_overlay.format)
+    if not ok_t or type(text) ~= "string" or text == "" then return end
+
+    if time_overlay.locale == "de" then
+        text = localize_de(text)
+    end
+
+    local x = time_overlay.x
+    if time_overlay.align == "right" or time_overlay.align == "center" then
+        local ok_w, w = pcall(function()
+            return font:width(text, time_overlay.size)
+        end)
+        if ok_w and type(w) == "number" then
+            x = (time_overlay.align == "right") and (x - w) or (x - w / 2)
+        end
+    end
+
+    local c = time_overlay.color
+    pcall(function()
+        font:write(x, time_overlay.y, text, time_overlay.size,
+                   c.r, c.g, c.b, c.a)
+    end)
+end
+
+-- Cornerlogo zeichnen — wird IMMER zuletzt gezeichnet, also über
+-- Folien, Backup-Bild UND Zeit-Overlay. Bei Backup-Video liegt das
+-- Logo auf der GL-Surface oberhalb des raw-Videos.
+local function draw_corner_logo()
+    if not corner_logo.enabled or not corner_logo.res then return end
+
+    if corner_logo.mode == "fullscreen" then
+        corner_logo.res:draw(0, 0, WIDTH, HEIGHT, 1)
+        return
+    end
+
+    -- "positioned"-Modus: Originalgröße des Bildes bei (x, y) zeichnen.
+    -- image:size() liefert Pixelmaße; Fallback auf Vollbild, falls
+    -- die Abfrage scheitert (z. B. Resource noch im "loading"-Zustand).
+    local ok, w, h = pcall(function() return corner_logo.res:size() end)
+    if ok and type(w) == "number" and type(h) == "number" then
+        local x, y = corner_logo.x, corner_logo.y
+        corner_logo.res:draw(x, y, x + w, y + h, 1)
+    else
+        corner_logo.res:draw(0, 0, WIDTH, HEIGHT, 1)
+    end
+end
+
 function node.render()
     update_audio_routing()
 
@@ -448,6 +649,8 @@ function node.render()
                 backup_slot.res:draw(0, 0, WIDTH, HEIGHT, 1)
             end
         end
+        -- Cornerlogo IMMER ganz oben (auch im Backup-Zustand).
+        draw_corner_logo()
         return
     end
 
@@ -512,23 +715,36 @@ function node.render()
     -- aus vorigen Frames als auch im Frame, in dem advance gerade
     -- outgoing gesetzt hat (cycle_elapsed = 0 → progress = 0 →
     -- outgoing voll sichtbar, cur unsichtbar — keine harte Folge).
+    local slide_drawn = false
     if outgoing then
         local cycle_elapsed = t - cycle_fade_start
         if fade_dur > 0 and cycle_elapsed < fade_dur then
             local progress = cycle_elapsed / fade_dur
             draw_crossfade(outgoing.res, cur.res, progress)
-            return
+            slide_drawn = true
+        else
+            end_cycle_fade()
         end
-        end_cycle_fade()
     end
 
-    -- Intra-Zyklus-Crossfade.
-    local fade_at = cur_dur - fade_dur
-    if fade_dur > 0 and elapsed >= fade_at and current_idx < #slides then
-        local nxt      = slides[current_idx + 1]
-        local progress = math.min(1, (elapsed - fade_at) / fade_dur)
-        draw_crossfade(cur.res, nxt.res, progress)
-    else
-        draw_fit(cur.res, 1)
+    if not slide_drawn then
+        -- Intra-Zyklus-Crossfade oder einfache Folie.
+        local fade_at = cur_dur - fade_dur
+        if fade_dur > 0 and elapsed >= fade_at and current_idx < #slides then
+            local nxt      = slides[current_idx + 1]
+            local progress = math.min(1, (elapsed - fade_at) / fade_dur)
+            draw_crossfade(cur.res, nxt.res, progress)
+        else
+            draw_fit(cur.res, 1)
+        end
     end
+
+    -- Zeit-Overlay über den Folien (in IDLE wird es ohnehin nicht
+    -- aufgerufen, da das frühe return im IDLE-Branch bereits gezogen
+    -- hat — somit bleibt die "hinter dem Backup-Layer"-Semantik
+    -- erhalten).
+    draw_time_overlay()
+
+    -- Cornerlogo IMMER ganz oben.
+    draw_corner_logo()
 end

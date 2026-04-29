@@ -5,6 +5,10 @@
     },
     "options": [
         {
+            "title": "Quelle",
+            "type": "section"
+        },
+        {
             "title": "Playlist-URL",
             "name": "playlist_url",
             "type": "string",
@@ -23,14 +27,14 @@
             "name": "allow_insecure_https",
             "type": "boolean",
             "default": false,
-            "hint": "Schaltet die TLS-Zertifikatsprüfung ab. Notwendig bei selbstsignierten Zertifikaten. Achtung: hebt den Schutz vor Man-in-the-Middle-Angriffen auf — nur in vertrauenswürdigen Netzen einsetzen."
+            "hint": "Schaltet die TLS-Zertifikatsprüfung ab. Achtung: hebt den Schutz vor Man-in-the-Middle-Angriffen auf."
         },
         {
             "title": "Polling-Intervall (Sekunden)",
             "name": "poll_interval",
             "type": "integer",
             "default": 60,
-            "hint": "Wie oft der Service-Sidecar die Playlist neu prüft. Niedriger = schnellere Updates, mehr Last auf dem Infotext-Server."
+            "hint": "Wie oft der Service-Sidecar die Playlist neu prüft."
         },
         {
             "title": "Wiederholversuch (Sekunden)",
@@ -38,6 +42,11 @@
             "type": "integer",
             "default": 30,
             "hint": "Pause vor erneutem Versuch nach HTTP-Fehler oder leerer Playlist."
+        },
+
+        {
+            "title": "Wiedergabe",
+            "type": "section"
         },
         {
             "title": "Fade-Dauer (Sekunden)",
@@ -53,28 +62,145 @@
             "default": 10,
             "hint": "Fallback für Folien ohne #EXTINF-Wert."
         },
+
+        {
+            "title": "Backup & Hintergrund",
+            "type": "section"
+        },
         {
             "title": "Backup-Inhalt (Bild oder Video)",
             "name": "backup_media",
             "type": "resource",
-            "valid": [
-                "image",
-                "video"
-            ],
+            "valid": ["image", "video"],
             "default": "empty.png",
-            "hint": "Wird angezeigt, wenn die Playlist nicht geladen werden kann oder leer ist. Bilder funktionieren auf jedem Pi; Video-Loops setzen Pi 4 oder neuer voraus."
+            "hint": "Wird angezeigt, wenn die Playlist nicht geladen werden kann oder leer ist. Bilder funktionieren auf jedem Pi; Video-Loops setzen Pi 4+ voraus."
         },
         {
             "title": "Hintergrund-Inhalt (Bild oder Video, optional)",
             "name": "background_media",
             "type": "resource",
-            "valid": [
-                "image",
-                "video"
-            ],
+            "valid": ["image", "video"],
             "optional": true,
-            "default": "empty.png",
-            "hint": "Bild oder MP4-Loop hinter den Folien. Bilder funktionieren auf jedem Pi; Video-Loops setzen Pi 4 oder neuer voraus (raw=true GL-Pipeline). Transparente PNG-Folien lassen den Hintergrund durchscheinen."
+            "hint": "Bild oder MP4-Loop hinter den Folien. Bilder funktionieren auf jedem Pi; Video-Loops setzen Pi 4+ voraus. Transparente PNG-Folien lassen den Hintergrund durchscheinen."
+        },
+
+        {
+            "title": "Zeit-Overlay",
+            "type": "section",
+            "intro": "Live-Uhr über den Folien (im Backup-Zustand verdeckt). Erfordert ein hochgeladenes Schrift-Asset."
+        },
+        {
+            "title": "Zeit-Overlay anzeigen",
+            "name": "time_enabled",
+            "type": "boolean",
+            "default": false
+        },
+        {
+            "title": "Zeit-Format",
+            "name": "time_format",
+            "type": "string",
+            "default": "%H:%M",
+            "hint": "strftime-Format. Beispiele: %H:%M (16:42), %H:%M:%S (16:42:07), %d.%m.%Y %H:%M (29.04.2026 16:42), %A, %d. %B %Y (Mittwoch, 29. April 2026)."
+        },
+        {
+            "title": "Zeit-Sprache",
+            "name": "time_locale",
+            "type": "select",
+            "options": [
+                ["de", "Deutsch (Wochentage und Monate übersetzt)"],
+                ["en", "Englisch (Rohausgabe von os.date)"]
+            ],
+            "default": "de",
+            "hint": "info-beamer-Lua nutzt die C-Locale (englische Namen). Bei 'Deutsch' werden Wochentage und Monate nachträglich übersetzt."
+        },
+        {
+            "title": "Zeit-Schrift",
+            "name": "time_font",
+            "type": "font",
+            "optional": true,
+            "hint": "TTF/OTF-Asset. Ohne hochgeladene Schrift bleibt das Overlay aus."
+        },
+        {
+            "title": "Zeit-Schriftgröße (Pixel)",
+            "name": "time_size",
+            "type": "integer",
+            "default": 80
+        },
+        {
+            "title": "Zeit-Farbe",
+            "name": "time_color",
+            "type": "color",
+            "default": [1, 1, 1, 1]
+        },
+        {
+            "title": "Zeit-Position X (Pixel)",
+            "name": "time_x",
+            "type": "integer",
+            "default": 1820,
+            "hint": "Pixel von links. Die Ausrichtung bestimmt, wie der Wert auf den Text bezogen wird."
+        },
+        {
+            "title": "Zeit-Position Y (Pixel)",
+            "name": "time_y",
+            "type": "integer",
+            "default": 980,
+            "hint": "Pixel von oben (oben-links der Schrift-Baseline)."
+        },
+        {
+            "title": "Zeit-Ausrichtung",
+            "name": "time_align",
+            "type": "select",
+            "options": [
+                ["left",   "Links (X = linke Kante des Texts)"],
+                ["center", "Zentriert (X = Mitte des Texts)"],
+                ["right",  "Rechts (X = rechte Kante des Texts)"]
+            ],
+            "default": "right"
+        },
+
+        {
+            "title": "Cornerlogo",
+            "type": "section",
+            "intro": "Transparentes PNG, das über allem liegt (auch im Backup-Zustand sichtbar)."
+        },
+        {
+            "title": "Cornerlogo anzeigen",
+            "name": "logo_enabled",
+            "type": "boolean",
+            "default": false
+        },
+        {
+            "title": "Cornerlogo-Bild",
+            "name": "logo_image",
+            "type": "resource",
+            "valid": ["image"],
+            "optional": true,
+            "hint": "PNG mit Alphakanal. Im Modus 'positioniert' kann das Asset in Originalgröße geliefert werden; im Modus 'Vollbild' muss es Display-Auflösung haben."
+        },
+        {
+            "title": "Cornerlogo-Modus",
+            "name": "logo_mode",
+            "type": "select",
+            "options": [
+                ["positioned", "Positioniert (klein, an X/Y-Pixel-Position)"],
+                ["fullscreen", "Vollbild-Vorlage (Position via Transparenz im PNG)"]
+            ],
+            "default": "positioned",
+            "hint": "'positioniert' ist der Standard und ressourcenschonender — kleines Asset wird an (X, Y) in Originalgröße gezeichnet."
+        },
+        {
+            "title": "Cornerlogo-Position X (Pixel)",
+            "name": "logo_x",
+            "type": "integer",
+            "default": 0,
+            "hint": "Pixel von links (linke Kante des Logos). Im Vollbild-Modus ignoriert."
+        },
+        {
+            "title": "Cornerlogo-Position Y (Pixel)",
+            "name": "logo_y",
+            "type": "integer",
+            "default": 0,
+            "hint": "Pixel von oben (obere Kante des Logos). Im Vollbild-Modus ignoriert."
         }
     ]
 }
