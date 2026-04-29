@@ -43,7 +43,6 @@
             "default": 30,
             "hint": "Pause vor erneutem Versuch nach HTTP-Fehler oder leerer Playlist."
         },
-
         {
             "title": "Wiedergabe",
             "type": "section"
@@ -62,7 +61,6 @@
             "default": 10,
             "hint": "Fallback für Folien ohne #EXTINF-Wert."
         },
-
         {
             "title": "Backup & Hintergrund",
             "type": "section"
@@ -71,7 +69,10 @@
             "title": "Backup-Inhalt (Bild oder Video)",
             "name": "backup_media",
             "type": "resource",
-            "valid": ["image", "video"],
+            "valid": [
+                "image",
+                "video"
+            ],
             "default": "empty.png",
             "hint": "Wird angezeigt, wenn die Playlist nicht geladen werden kann oder leer ist. Bilder funktionieren auf jedem Pi; Video-Loops setzen Pi 4+ voraus."
         },
@@ -79,11 +80,13 @@
             "title": "Hintergrund-Inhalt (Bild oder Video, optional)",
             "name": "background_media",
             "type": "resource",
-            "valid": ["image", "video"],
-            "optional": true,
+            "valid": [
+                "image",
+                "video"
+            ],
+            "default": "empty.png",
             "hint": "Bild oder MP4-Loop hinter den Folien. Bilder funktionieren auf jedem Pi; Video-Loops setzen Pi 4+ voraus. Transparente PNG-Folien lassen den Hintergrund durchscheinen."
         },
-
         {
             "title": "Zeit-Overlay",
             "type": "section",
@@ -107,8 +110,14 @@
             "name": "time_locale",
             "type": "select",
             "options": [
-                ["de", "Deutsch (Wochentage und Monate übersetzt)"],
-                ["en", "Englisch (Rohausgabe von os.date)"]
+                [
+                    "de",
+                    "Deutsch (Wochentage und Monate übersetzt)"
+                ],
+                [
+                    "en",
+                    "Englisch (Rohausgabe von os.date)"
+                ]
             ],
             "default": "de",
             "hint": "info-beamer-Lua nutzt die C-Locale (englische Namen). Bei 'Deutsch' werden Wochentage und Monate nachträglich übersetzt."
@@ -130,7 +139,12 @@
             "title": "Zeit-Farbe",
             "name": "time_color",
             "type": "color",
-            "default": [1, 1, 1, 1]
+            "default": [
+                1,
+                1,
+                1,
+                1
+            ]
         },
         {
             "title": "Zeit-Position X (Pixel)",
@@ -151,13 +165,21 @@
             "name": "time_align",
             "type": "select",
             "options": [
-                ["left",   "Links (X = linke Kante des Texts)"],
-                ["center", "Zentriert (X = Mitte des Texts)"],
-                ["right",  "Rechts (X = rechte Kante des Texts)"]
+                [
+                    "left",
+                    "Links (X = linke Kante des Texts)"
+                ],
+                [
+                    "center",
+                    "Zentriert (X = Mitte des Texts)"
+                ],
+                [
+                    "right",
+                    "Rechts (X = rechte Kante des Texts)"
+                ]
             ],
             "default": "right"
         },
-
         {
             "title": "Cornerlogo",
             "type": "section",
@@ -173,7 +195,9 @@
             "title": "Cornerlogo-Bild",
             "name": "logo_image",
             "type": "resource",
-            "valid": ["image"],
+            "valid": [
+                "image"
+            ],
             "optional": true,
             "hint": "PNG mit Alphakanal. Im Modus 'positioniert' kann das Asset in Originalgröße geliefert werden; im Modus 'Vollbild' muss es Display-Auflösung haben."
         },
@@ -182,8 +206,14 @@
             "name": "logo_mode",
             "type": "select",
             "options": [
-                ["positioned", "Positioniert (klein, an X/Y-Pixel-Position)"],
-                ["fullscreen", "Vollbild-Vorlage (Position via Transparenz im PNG)"]
+                [
+                    "positioned",
+                    "Positioniert (klein, an X/Y-Pixel-Position)"
+                ],
+                [
+                    "fullscreen",
+                    "Vollbild-Vorlage (Position via Transparenz im PNG)"
+                ]
             ],
             "default": "positioned",
             "hint": "'positioniert' ist der Standard und ressourcenschonender — kleines Asset wird an (X, Y) in Originalgröße gezeichnet."
