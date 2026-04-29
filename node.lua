@@ -449,14 +449,22 @@ local function update_audio_routing()
 
     if target == audio_active then return end
 
-    -- Aktive Quelle stoppen. Beim Stream nur Volume auf 0 ziehen —
-    -- nicht :stop()/:dispose(), damit der Decoder verbunden bleibt
-    -- und der nächste Wechsel ohne Reconnect-Latenz hörbar ist.
-    if audio_active == "background" then
-        video_pause(background_slot)
-    elseif audio_active == "backup" then
-        video_pause(backup_slot)
-    elseif audio_active == "stream" and audio_stream.res then
+    -- Alle Quellen ausser dem Ziel muten. Nicht nur die zuletzt
+    -- aktive — sonst koennten Quellen, die seit Boot durchgaengig
+    -- via load_media :start()ed sind (Visual-Playback) ihren Audio-
+    -- Track ungewollt durchschicken (z. B. Hintergrund-Video parallel
+    -- zum Stream nach einem Package-Switch). Beim Stream nur Volume
+    -- auf 0 ziehen, nicht :stop()/:dispose() — der Decoder bleibt
+    -- verbunden und der naechste Wechsel ist ohne Reconnect-Latenz.
+    if target ~= "background"
+       and background_slot.kind == "video" and background_slot.res then
+        pcall(function() background_slot.res:stop() end)
+    end
+    if target ~= "backup"
+       and backup_slot.kind == "video" and backup_slot.res then
+        pcall(function() backup_slot.res:stop() end)
+    end
+    if target ~= "stream" and audio_stream.res then
         pcall(function() audio_stream.res:volume(0) end)
     end
 
@@ -538,6 +546,15 @@ local function update_media_slot(slot, cfg_value, default_name)
         -- Folien-Pixel das Video durchscheinen lassen können.
         if kind == "video" and slot.layer ~= nil then
             pcall(function() r:layer(slot.layer) end)
+            -- Visual-Playback sofort starten. paused=true im Load
+            -- haelt Video- UND Audio-Decoder an; ohne diesen :start()
+            -- bleibt das Bild eingefroren, sobald das Audio-Routing
+            -- direkt auf eine andere Quelle (z. B. den Stream) zielt
+            -- und video_play(slot) nie aufruft. Das nachfolgende
+            -- :stop() im Routing pausiert auf info-beamer empirisch
+            -- nur den Audio-Track, nicht den Frame-Strom — daher
+            -- bleibt das Video sichtbar.
+            pcall(function() r:start() end)
         end
     else
         local hint = (kind == "video") and " (Video-Loop benötigt Pi 4+)" or ""
