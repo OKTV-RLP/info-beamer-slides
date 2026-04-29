@@ -380,8 +380,16 @@ function node.render()
     end
 
     -- Normal-Flow inkl. Intra-Zyklus-Crossfade.
+    --
+    -- Eine Folie muss mindestens fade_dur lang "current" sein, sonst
+    -- bleibt fuer den Crossfade auf die naechste Folie keine Zeit. Bei
+    -- duration=0 (oder duration < fade_dur) wuerde der Advance sofort
+    -- nach dem Eintritt ausloesen und den Out-Fade ueberspringen — die
+    -- naechste Folie poppt dann hart rein. Mit max(duration, fade_dur)
+    -- spielt der Crossfade immer komplett.
+    local cur_dur = math.max(cur.duration, fade_dur)
     local elapsed = t - slide_started
-    if elapsed >= cur.duration then
+    if elapsed >= cur_dur then
         if current_idx >= #slides then
             -- Zyklus-Ende: outgoing erfassen, ggf. pending einsetzen.
             set_outgoing(cur)
@@ -395,10 +403,11 @@ function node.render()
         end
         slide_started = t
         cur           = slides[current_idx]
+        cur_dur       = math.max(cur.duration, fade_dur)
         elapsed       = 0
     end
 
-    local fade_at = cur.duration - fade_dur
+    local fade_at = cur_dur - fade_dur
     if fade_dur > 0 and elapsed >= fade_at and current_idx < #slides then
         local nxt      = slides[current_idx + 1]
         local progress = math.min(1, (elapsed - fade_at) / fade_dur)
