@@ -41,8 +41,18 @@ local CONFIG = {
 -- transparenten Folien-PNG-Bereichen das Video durchscheinen lassen.
 -- Backup auf höherer (= weniger negativer) Ebene als Background, damit
 -- es im IDLE-Zustand das Hintergrund-Video überdeckt.
-local backup_slot     = { res = nil, kind = nil, file = nil, label = "Backup-Inhalt",     layer = -1 }
-local background_slot = { res = nil, kind = nil, file = nil, label = "Hintergrund-Inhalt", layer = -2 }
+-- slot.audio steuert, ob die Resource mit Audio-Track geladen wird.
+-- Backup-Video: immer mit Audio (Audio-Quelle nur waehrend IDLE+
+-- backup-video sichtbar; Pause durch :stop() in anderen States ist
+-- ok, weil das Video dann ohnehin off-screen ge:place't ist).
+-- Background-Video: dynamisch, abhaengig von audio_stream.enabled.
+--   Stream aus → audio=true  (BG-Video kann Audio-Quelle sein)
+--   Stream an  → audio=false (BG-Video laeuft visuell durchgehend
+--                             und wird vom Routing nicht :stop()ed)
+-- Bei Toggle des Stream-Zustands forciert update_media_slot ueber
+-- den slot.audio_loaded-Vergleich einen Reload des BG-Videos.
+local backup_slot     = { res = nil, kind = nil, file = nil, label = "Backup-Inhalt",     layer = -1, audio = true }
+local background_slot = { res = nil, kind = nil, file = nil, label = "Hintergrund-Inhalt", layer = -2, audio = true }
 
 -- Optionales Zeit-Overlay. Wird im PLAYING-Zustand über den Folien
 -- gezeichnet, im IDLE-Zustand vom Backup-Layer überdeckt (durch
@@ -151,17 +161,20 @@ local function media_type_for(value, name)
 end
 
 -- Lädt ein Media-Asset entsprechend seines Typs. Videos werden mit
--- raw=true (GL-Pipeline) und audio=true geladen; paused=true, weil
--- update_audio_routing entscheidet, wer aktiv abspielt — nur eine
--- Audio-Quelle gleichzeitig. Auf Pi 3 schlägt raw-Video fehl, der
--- pcall-Aufruf liefert ok=false.
-local function load_media(name, kind)
+-- raw=true (GL-Pipeline) geladen. with_audio steuert pro Slot, ob
+-- ein Audio-Track mitgeladen wird — das Hintergrund-Video bekommt
+-- audio=false, weil sein Frame-Strom durchgehend visuell laufen muss
+-- und info-beamers :stop() Audio nicht ohne Video muten kann. paused
+-- =true, weil update_media_slot direkt nach load :start() aufruft
+-- (so beginnt der Decoder unter unserer Kontrolle). Auf Pi 3
+-- schlägt raw-Video fehl, der pcall-Aufruf liefert ok=false.
+local function load_media(name, kind, with_audio)
     if kind == "video" then
         return pcall(resource.load_video, {
             file   = name,
             looped = true,
             raw    = true,
-            audio  = true,
+            audio  = with_audio and true or false,
             paused = true,
         })
     end
@@ -435,44 +448,55 @@ local function check_audio_stream_health()
 end
 
 local function update_audio_routing()
+    -- Audio-Quellen mit Prioritaet:
+    --   1. BACKUP-Video (in IDLE mit Backup als Video)
+    --   2. Stream (wenn audio_stream.enabled + Resource ready)
+    --   3. BG-Video (nur wenn mit Audio geladen, d. h.
+    --      audio_stream.enabled = false → BG hat audio_loaded = true)
+    -- Kein dynamisches Fallback bei Stream-Ausfall: ist der Stream
+    -- konfiguriert aber gerade nicht ladbar, bleibt's stumm — wir
+    -- wechseln NICHT auf BG-Video-Audio (das ist sowieso ohne Audio
+    -- geladen, solange der Stream konfiguriert ist).
     local target
     if state == STATE_IDLE
        and backup_slot.kind == "video" and backup_slot.res then
         target = "backup"
-    elseif audio_stream.enabled and audio_stream.res then
-        target = "stream"
-    elseif background_slot.kind == "video" and background_slot.res then
+    elseif audio_stream.enabled then
+        if audio_stream.res then target = "stream" end
+    elseif background_slot.kind == "video"
+       and background_slot.res
+       and background_slot.audio_loaded then
         target = "background"
-    else
-        target = nil
     end
 
     if target == audio_active then return end
 
-    -- Alle Quellen ausser dem Ziel muten. Nicht nur die zuletzt
-    -- aktive — sonst koennten Quellen, die seit Boot durchgaengig
-    -- via load_media :start()ed sind (Visual-Playback) ihren Audio-
-    -- Track ungewollt durchschicken (z. B. Hintergrund-Video parallel
-    -- zum Stream nach einem Package-Switch). Beim Stream nur Volume
-    -- auf 0 ziehen, nicht :stop()/:dispose() — der Decoder bleibt
-    -- verbunden und der naechste Wechsel ist ohne Reconnect-Latenz.
-    if target ~= "background"
-       and background_slot.kind == "video" and background_slot.res then
-        pcall(function() background_slot.res:stop() end)
-    end
+    -- Mute alle Nicht-Ziel-Audio-Quellen. Bei Videos :stop() (pausiert
+    -- auch den Frame-Strom — fuer Backup egal weil off-screen, fuer
+    -- BG nur dann aufgerufen, wenn es ueberhaupt mit Audio geladen
+    -- ist; sonst gibt's nichts zu muten und :stop() wuerde nur den
+    -- Visual-Freeze ausloesen). Beim Stream :volume(0), damit der
+    -- Decoder verbunden bleibt und ein Reaktivieren ohne Reconnect-
+    -- Latenz hoerbar ist.
     if target ~= "backup"
        and backup_slot.kind == "video" and backup_slot.res then
         pcall(function() backup_slot.res:stop() end)
+    end
+    if target ~= "background"
+       and background_slot.kind == "video"
+       and background_slot.res
+       and background_slot.audio_loaded then
+        pcall(function() background_slot.res:stop() end)
     end
     if target ~= "stream" and audio_stream.res then
         pcall(function() audio_stream.res:volume(0) end)
     end
 
-    -- Neue Quelle starten.
-    if target == "background" then
-        video_play(background_slot)
-    elseif target == "backup" then
+    -- Aktiviere Ziel.
+    if target == "backup" then
         video_play(backup_slot)
+    elseif target == "background" then
+        video_play(background_slot)
     elseif target == "stream" and audio_stream.res then
         pcall(function() audio_stream.res:volume(audio_stream.volume) end)
     end
@@ -529,19 +553,25 @@ local function update_media_slot(slot, cfg_value, default_name)
     local name = resolve_resource(cfg_value) or default_name
     if name == "" then name = nil end
 
-    if name == slot.file then return end
+    -- Reload, wenn der Filename ODER der gewuenschte Audio-Modus
+    -- sich gegenueber dem zuletzt geladenen Stand unterscheidet.
+    -- Audio-Mode-Wechsel passiert beim BG-Video, sobald audio_stream
+    -- ein-/ausgeschaltet wird.
+    if name == slot.file and slot.audio == slot.audio_loaded then return end
 
     if slot.res then
         pcall(function() slot.res:dispose() end)
     end
     slot.res, slot.kind, slot.file = nil, nil, name
+    slot.audio_loaded = nil
 
     if not name then return end
 
     local kind = media_type_for(cfg_value, name)
-    local ok, r = load_media(name, kind)
+    local ok, r = load_media(name, kind, slot.audio)
     if ok and r then
         slot.res, slot.kind = r, kind
+        slot.audio_loaded = slot.audio
         -- raw-Video hinter die GL-Surface legen, damit transparente
         -- Folien-Pixel das Video durchscheinen lassen können.
         if kind == "video" and slot.layer ~= nil then
@@ -572,6 +602,15 @@ util.file_watch("config.json", function(raw)
     CONFIG.fade_duration    = tonumber(cfg.fade_duration)    or 0.5
     CONFIG.default_duration = tonumber(cfg.default_duration) or 10
 
+    -- Audio-Stream-Zustand ZUERST lesen — bestimmt, ob das Hintergrund-
+    -- Video mit oder ohne Audio-Track geladen wird (s. background_slot
+    -- Kommentar). update_media_slot disposed+reloadet das BG-Video
+    -- automatisch beim Toggle.
+    audio_stream.enabled = cfg.audio_stream_enabled and true or false
+    audio_stream.url     = cfg.audio_stream_url or ""
+    audio_stream.volume  = db_to_linear(tonumber(cfg.audio_stream_volume_db))
+    background_slot.audio = not audio_stream.enabled
+
     update_media_slot(backup_slot,     cfg.backup_media,     "empty.png")
     update_media_slot(background_slot, cfg.background_media, nil)
 
@@ -600,13 +639,10 @@ util.file_watch("config.json", function(raw)
     corner_logo.y       = tonumber(cfg.logo_y) or 0
     update_corner_logo(resolve_resource(cfg.logo_image))
 
-    -- Audio-Stream (Icecast/HTTP). check_audio_stream_health im Render
-    -- erkennt URL-Änderungen und lädt entsprechend neu.
-    audio_stream.enabled = cfg.audio_stream_enabled and true or false
-    audio_stream.url     = cfg.audio_stream_url or ""
-    audio_stream.volume  = db_to_linear(tonumber(cfg.audio_stream_volume_db))
     -- Pegel-Änderung im laufenden Stream sofort übernehmen, ohne
     -- erst auf den nächsten Routing-Wechsel zu warten.
+    -- (audio_stream.enabled/url/volume wurden weiter oben gesetzt,
+    -- damit BG-Video-Reload den richtigen Audio-Modus bekommt.)
     if audio_active == "stream" and audio_stream.res then
         pcall(function() audio_stream.res:volume(audio_stream.volume) end)
     end
