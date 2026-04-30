@@ -1,79 +1,145 @@
 # Infotext Player für info-beamer hosted
 
-Spielt Folien (`playlist.m3u8` + PNG-Folien mit optionalem
-Alphakanal) auf einem info-beamer-hosted-Pi ab.
+Spielt Folien (`playlist.m3u8` + PNG-Folien mit optionalem Alphakanal)
+auf einem info-beamer-hosted-Pi ab. Mit Crossfade, Backup-/
+Hintergrund-Layer (Bild oder Video), Live-Uhr-Overlay, Cornerlogo und
+optionalem HTTP/Icecast-Audio-Stream als Hintergrundton.
 
 ## Architektur
 
-info-beamer-Lua-Knoten haben **kein eingebautes HTTP**. Das Package
-besteht daher aus zwei Teilen:
+info-beamer-Lua-Knoten haben **kein eingebautes HTTP** und **keine
+zuverlässige Wall-Clock-API**. Das Package besteht daher aus zwei
+Teilen:
 
 ```
-service        ← Python-Sidecar: pollt HTTP, speichert Folien, schreibt
-                 manifest.json (HTTP/HTTPS, optional self-signed)
+service        ← Python-Sidecar:
+                   • pollt HTTP, lädt Folien herunter,
+                     schreibt manifest.json
+                   • berechnet Lokalzeit (pytz) und pusht
+                     den Anzeigetext via UDP-IPC
                        │
                        ▼
-                 manifest.json + cache/*.png
+                 manifest.json + slide_*.png (Folien-Dateien
+                 mit Prefix im Knoten-Wurzelverzeichnis)
+                 +  UDP localhost:4444 → "root/time:<text>"
                        │
                        ▼
-node.lua       ← Renderer: liest manifest via util.json_watch, lädt
-                 Folien aus cache/, rendert mit Crossfade
+node.lua       ← Renderer:
+                   • liest manifest via util.json_watch
+                   • empfängt Zeit via util.data_mapper{ time = … }
+                   • rendert mit Crossfade-Shader (prämultiplizierter
+                     Alpha-Lerp), Zeit-Overlay, Cornerlogo
 ```
 
 - Der Service pollt regelmäßig (`poll_interval`, Default 60 s) und
   schreibt nur dann ein neues Manifest, wenn sich die Folien-Liste
   ändert.
 - Der Renderer wendet ein neues Manifest am **Ende des aktuellen
-  Zyklus** an, mit Crossfade von der letzten Folie der alten Liste zur
-  ersten Folie der neuen — analog zum HTML-Player.
+  Zyklus** an, mit Crossfade von der letzten Folie der alten Liste
+  zur ersten Folie der neuen.
 - Folien-Filenames sind content-adressiert; der Cache prüft daher nur
   auf Existenz, kein Hash-Vergleich, keine Re-Downloads.
+- Zeit-Overlay-Updates gehen per UDP an `127.0.0.1:4444` — keine
+  SD-Schreibzyklen, sub-Sekunden-Latenz Service → Renderer.
 
 ## Features
 
 - HTTP **und** HTTPS, optional mit self-signed-Zertifikaten
   (`allow_insecure_https`).
 - Crossfade zwischen Folien innerhalb eines Zyklus **und** über die
-  Zyklus-Grenze hinweg.
-- Backup-Inhalt aus Hosted-Asset-Pool, wenn Playlist nicht ladbar oder
-  leer — Bild oder Video-Loop möglich.
-- Optionaler Hintergrund-Inhalt (Bild oder Video-Loop), der durch die
-  transparenten Folien durchscheint.
+  Zyklus-Grenze hinweg, mit Fragment-Shader für mathematisch korrekte
+  Alpha-Komposition.
+- Backup-Inhalt (Bild oder Video-Loop), wenn die Playlist nicht ladbar
+  oder leer ist.
+- Optionaler Hintergrund-Inhalt (Bild oder Video-Loop), durch den die
+  transparenten Folien durchscheinen.
+- Konfigurierbares Zeit-Overlay (Schrift, Größe, Farbe, Position,
+  Ausrichtung, Format, Timezone, mehrzeilig, deutsche Wochentag-/
+  Monatsnamen).
+- Optionales Cornerlogo (transparentes PNG, frei positionierbar oder
+  als Vollformat-Vorlage).
+- Optionaler HTTP-/Icecast-Audio-Stream als Hintergrundton mit
+  konfigurierbarem dB-Pegel und automatischem Reconnect bei Abriss.
 
 ## Installation
 
 1. Diesen Ordner als Package nach info-beamer hosted hochladen
    (`Packages → Upload`).
 2. Auf Basis des Packages ein Setup anlegen.
-3. Optional: eigenes Backup-Asset (Bild oder Video) hochladen und im
-   Setup auswählen — sonst wird `empty.png` verwendet (schwarzes Bild).
-4. Optional: Hintergrund-Asset (Bild oder Video) hochladen und im
-   Setup-Feld *Hintergrund-Inhalt* auswählen.
-5. `Playlist-URL` und `Folien-Basis-URL` des Infotext-Servers
-   eintragen, ggf. *Self-signed-HTTPS akzeptieren* einschalten, Setup
-   einem Device zuweisen.
+3. **Quelle**: `Playlist-URL` und `Folien-Basis-URL` des Infotext-
+   Servers eintragen. Bei selbstsigniertem Zertifikat *Self-signed-
+   HTTPS akzeptieren* einschalten.
+4. **Optional Backup/Hintergrund**: eigenes Bild- oder Video-Asset
+   hochladen und im Setup auswählen.
+5. **Optional Zeit-Overlay**: aktivieren, Format und Position einstellen.
+6. **Optional Cornerlogo**: aktivieren und Asset wählen.
+7. **Optional Audio-Stream**: aktivieren und Stream-URL eintragen
+   (siehe Voraussetzungen unten).
+8. Setup einem Device zuweisen.
 
 ## Konfigurationsoptionen
+
+### Quelle
 
 | Option | Default | Beschreibung |
 |---|---|---|
 | Playlist-URL | – | M3U8-Playlist-URL (http:// oder https://) |
 | Folien-Basis-URL | – | Verzeichnis-URL der Folien-Bilder |
-| Self-signed-HTTPS akzeptieren | false | TLS-Pruefung deaktivieren |
+| Self-signed-HTTPS akzeptieren | false | TLS-Prüfung deaktivieren |
 | Polling-Intervall | 60 s | Wie oft der Service die Playlist prüft |
 | Wiederholversuch | 30 s | Pause nach HTTP-Fehler oder leerer Playlist |
-| Fade-Dauer | 0.5 s | Crossfade zwischen Folien (intra- und inter-Zyklus) |
+
+### Wiedergabe
+
+| Option | Default | Beschreibung |
+|---|---|---|
+| Fade-Dauer | 0.5 s | Crossfade-Dauer |
 | Standard-Anzeigedauer | 10 s | Fallback wenn `#EXTINF` fehlt |
+
+### Backup & Hintergrund
+
+| Option | Default | Beschreibung |
+|---|---|---|
 | Backup-Inhalt | empty.png | Bild oder Video bei Fehler/leerer Playlist |
-| Hintergrund-Inhalt | (leer) | Optionales Bild oder Video hinter den Folien |
+| Hintergrund-Inhalt | empty.png | Bild oder Video hinter den Folien |
+
+### Zeit-Overlay
+
+| Option | Default | Beschreibung |
+|---|---|---|
+| Anzeigen | false | Live-Uhr aktivieren |
+| Zeit-Format | `%H:%M` | strftime, mehrzeilig per Enter im Eingabefeld |
+| Zeitzone | `Europe/Berlin` | IANA-Zeitzone (Sommer-/Winterzeit automatisch) |
+| Zeit-Sprache | `de` | Deutsche Wochentag-/Monatsnamen, sonst Englisch |
+| Schrift | `DejaVuSans.ttf` | TTF-Asset (DejaVu Sans im Package gebündelt) |
+| Schriftgröße | 80 px | |
+| Farbe | weiß | RGBA |
+| Position X / Y | 1820 / 980 | Pixel von links oben |
+| Ausrichtung | rechts | links / zentriert / rechts |
+
+### Cornerlogo
+
+| Option | Default | Beschreibung |
+|---|---|---|
+| Anzeigen | false | Logo aktivieren |
+| Bild | 1x1trans.png | PNG mit Alphakanal |
+| Position X / Y | 0 / 0 | Pixel von links oben (linke Kante des Logos) |
+
+### Hintergrund-Audio (Stream)
+
+| Option | Default | Beschreibung |
+|---|---|---|
+| Aktivieren | false | Audio-Stream einschalten |
+| Stream-URL | – | z. B. `http://stream.example.com:8000/radio.mp3` |
+| Lautstärke | 0 dB | dB-Pegel (0 = voll, –20 dB = leise, ≤ –60 dB = stumm) |
 
 ## HTTP/HTTPS und self-signed-Zertifikate
 
-Der Python-Service nutzt die `requests`-Library. Standardmäßig wird die
-TLS-Zertifikatskette gegen die System-CA validiert.
+Der Python-Service nutzt die `requests`-Library. Standardmäßig wird
+die TLS-Zertifikatskette gegen die System-CA validiert.
 
-- **Reguläre Zertifikate** (Let's Encrypt etc.): einfach `https://`-URL
-  eintragen, fertig.
+- **Reguläre Zertifikate** (Let's Encrypt etc.): einfach
+  `https://`-URL eintragen, fertig.
 - **Self-signed-Zertifikate**: Option *Self-signed-HTTPS akzeptieren*
   einschalten. Das setzt `verify=False` in `requests.get()` und
   unterdrückt die `InsecureRequestWarning`-Logs. **Schutz vor MITM
@@ -94,59 +160,130 @@ also in nativer Display-Auflösung (z. B. 1920×1080) liefern.
 **Video-Loop:** wird mit `raw = true` in die GL-Pipeline geladen, damit
 es sich mit anderen Layern mischen lässt. Das setzt **Raspberry Pi 4
 oder neuer** voraus. Auf Pi 3 schlägt der Load fehl, der Player loggt
-eine Warnung (`<Slot> nicht ladbar … (Video-Loop benötigt Pi 4+)`) und
-arbeitet ohne den betroffenen Slot weiter:
-- Hintergrund-Slot leer → Schwarz hinter den Folien.
-- Backup-Slot leer → Schwarzer Bildschirm während Fehlerzustand.
+eine Warnung und arbeitet ohne den betroffenen Slot weiter.
 
-Wer Pi-3-Kompatibilität braucht, lädt für die jeweiligen Slots ein Bild
-hoch.
+## Zeit-Overlay
 
-**Skalierung:** sowohl Bilder als auch Videos werden auf den vollen
-Output-Bildschirm gestreckt (kein Letterbox). Folien, Backup-Inhalt
-und Hintergrund-Inhalt daher **in nativer Display-Auflösung
-liefern** (z. B. 1920×1080), sonst verzerrt es. Hintergrund: bei
-raw-Videos gibt info-beamer ohnehin keine Aspect-Korrektur (kein
-`:size()` für `:place`), bei Bildern ist es eine bewusste Wahl —
-Letterbox-Balken stören den Look des Players.
+Optionale Live-Uhr, gerendert über den Folien (im Backup-Zustand
+verdeckt). Format und Timezone werden vom Python-Service ausgewertet
+(via `pytz`); der Renderer empfängt nur den fertigen Anzeigetext per
+UDP — kein Disk-IO, ~1 Update/Sekunde.
 
-## Audio
+**Timezone-Behandlung:** info-beamer-Lua hat bewusst keine zuverlässige
+Wall-Clock-API. Daher rechnet der Service. Der Default `Europe/Berlin`
+wechselt automatisch zwischen MEZ und MESZ. Andere IANA-Zonen wie
+`UTC`, `America/New_York` etc. funktionieren auch.
 
-Videos werden mit `audio = true` geladen; vorhandene Audio-Tracks
-werden über das info-beamer-Audio-Target ausgegeben (HDMI bei Hosted-
-Default). Da info-beamer keinen Runtime-Mute kennt, schaltet der Player
-zwischen den Quellen über `:stop()` und `:start()`:
+**Mehrzeilige Anzeige:** Zeilenumbrüche im *Zeit-Format*-Eingabefeld
+werden zu echten Zeilenumbrüchen in der Ausgabe. Beispiel-Format mit
+Enter zwischen den Tokens:
 
-- **Normalbetrieb (Folienwiedergabe):** Audio des Hintergrund-Videos.
-- **Backup mit Backup-VIDEO:** Audio des Backup-Videos. Hintergrund-
-  Video wird angehalten (Frame eingefroren, Decoder pausiert).
-- **Backup mit Backup-BILD (oder leerem Slot):** Audio des Hintergrund-
-  Videos läuft weiter; das Backup-Bild liegt visuell darüber.
+```
+%H:%M
+%d.%m.%Y
+```
 
-Wenn weder Hintergrund- noch Backup-Slot ein Video ist, ist der Player
-stumm. Das Backup-Default `empty.png` ist ein Bild — Audio kommt also
-vom Hintergrund-Video, sofern eines konfiguriert ist.
+ergibt zwei Zeilen Anzeige:
+
+```
+16:42
+30.04.2026
+```
+
+**Lokalisierung:** info-beamers C-Locale liefert `%A` (Wochentag) und
+`%B` (Monat) auf Englisch. Bei *Zeit-Sprache = Deutsch* (Default)
+ersetzt der Renderer Englisch → Deutsch nachträglich (`Wednesday` →
+`Mittwoch`, `April` → `April`, `Mar` → `Mär` usw.). Frontier-Patterns
+verhindern Falsch-Substitutionen wie `Mon` in `Montag`.
+
+**Schrift:** im Package ist `DejaVuSans.ttf` (757 KB, public-domain-
+permissiv) gebündelt. Eigene TTF-Assets können hochgeladen und über
+das Setup-Feld ausgewählt werden.
+
+## Cornerlogo
+
+Optionales transparentes PNG, das **immer ganz oben** liegt — auch im
+Backup-Zustand sichtbar. Im PLAYING-Zustand zwischen Folien und Zeit-
+Overlay platziert (s. Render-Reihenfolge im Code).
+
+Das Asset wird in seiner Original­größe bei `(logo_x, logo_y)`
+gezeichnet. Zwei Verwendungs­muster:
+
+- **Klein, positioniert**: kompaktes PNG (z. B. 200×100 px), `logo_x` /
+  `logo_y` definiert die Top-Left-Pixel-Position.
+- **Vollformat-Vorlage**: PNG in Display-Auflösung mit Logo via
+  Transparenz positioniert, `logo_x` / `logo_y` auf 0/0 lassen — füllt
+  den ganzen Bildschirm.
+
+Default ist ein 1×1-transparentes PNG, das faktisch unsichtbar ist —
+wer das Logo nutzen will, lädt sein eigenes Asset hoch.
+
+## Hintergrund-Audio (Icecast/HTTP-Stream)
+
+Optionaler Audio-Stream als Hintergrundton, geladen via
+`resource.load_audio`. MP3-Icecast-Streams sind am zuverlässigsten;
+HLS, AAC, Ogg sollten ebenfalls funktionieren.
+
+**Voraussetzungen:**
+- `runtime.outside_sources = true` in `package.json` (im Package
+  bereits gesetzt) — erlaubt info-beamer das Laden externer URLs.
+- `sys.provides("audio") == true` auf der Hardware — Pi-Build mit
+  Audio-Support.
+
+**Pegel-Anpassung:** dB-Skala für den Stream — `0` ist volle
+Lautstärke, `-20 dB` ein angenehmes Hintergrund-Niveau, `≤ -60 dB`
+praktisch stumm. Werte > 0 werden auf 0 begrenzt (info-beamers
+`:volume()` kann nur absenken, nicht verstärken).
+
+**Reconnect:** Wenn der Stream abreißt, erkennt der Watchdog den
+Decoder-State (`error`/`finished`) und versucht nach 5 s eine
+Neuverbindung. Kein dynamischer Audio-Fallback auf Hintergrund-Video.
+
+## Audio-Routing-Prioritäten
+
+Audio kommt von genau einer Quelle gleichzeitig. Priorität:
+
+1. **Backup-Video** (im IDLE-Zustand mit Backup als Video) — höchste
+   Priorität.
+2. **Audio-Stream** (wenn aktiviert + Verbindung steht).
+3. **Hintergrund-Video** (Default-Quelle, wenn obige aus oder nicht
+   anwendbar).
+
+**Stream-Toggle-Verhalten:** beim Ein-/Ausschalten des Audio-Streams
+wird das Hintergrund-Video disposed und mit passendem Audio-Modus neu
+geladen (kurzer visueller Glitch von Bruchteilen einer Sekunde):
+
+- Stream **aus** → BG-Video lädt mit `audio = true`, kann Audio liefern.
+- Stream **an** → BG-Video lädt mit `audio = false` und läuft visuell
+  durchgehend; Audio kommt vom Stream. Grund: info-beamers
+  `:stop()` pausiert Video- und Audio-Decoder gemeinsam — wir können
+  nicht gezielt nur den Audio-Track muten.
 
 ## Voraussetzungen
 
-- info-beamer hosted Runtime (Service-Sidecar mit Python 2.7 und
-  `requests` ist Standard).
+- info-beamer hosted Runtime mit Python 2.7 + `requests` + `pytz`
+  (Standard).
+- `runtime.outside_sources = true` in `package.json` (im Package
+  bereits gesetzt) — für Audio-Stream-Loading.
 - Erreichbarkeit des Quell-Servers per HTTP/HTTPS vom Pi aus.
 - Folien-Filenames müssen content-addressed sein (gleicher Name ⇒
   gleicher Inhalt).
 - Für Video-Loops: Raspberry Pi 4 oder neuer.
+- Für Audio-Stream: Pi-Build mit `sys.provides("audio")`.
 
 ## Caching-Verhalten
 
-- **Cache-Verzeichnis**: `cache/` neben dem Service. Lua liest die
-  Folien direkt von dort.
+- **Cache-Ort**: Folien werden mit `slide_`-Prefix direkt im Knoten-
+  Wurzelverzeichnis abgelegt (kein Subverzeichnis — info-beamer
+  behandelt Subdirs als Child-Nodes und findet zur Laufzeit befüllte
+  Dateien dort nicht zuverlässig).
 - **Download nur bei Bedarf**: Filenames sind content-adressiert; der
-  Service prüft vor jedem Download nur, ob `cache/<name>` existiert.
+  Service prüft vor jedem Download nur, ob die Datei existiert.
 - **Cache-GC**: nach jedem erfolgreichen Playlist-Fetch löscht der
-  Service alle Files in `cache/`, die nicht mehr in der aktuellen
-  Playlist stehen, sowie `.tmp`-Reste abgebrochener Downloads. Wird
-  bei HTTP-Fehler oder leerer Playlist übersprungen, damit ein
-  Server-Ausfall nicht den Cache wegwirft.
+  Service alle Files mit `slide_`-Prefix, die nicht mehr in der
+  aktuellen Playlist stehen, sowie `.tmp`-Reste abgebrochener
+  Downloads. Wird bei HTTP-Fehler oder leerer Playlist übersprungen,
+  damit ein Server-Ausfall nicht den Cache wegwirft.
 - **Cache-Wipe bei Service-Update**: info-beamer entfernt alle vom
   Service erzeugten Files (außer `SCRATCH/`), wenn das Service-Skript
   aktualisiert wird. Folien werden dann beim ersten Polling neu
@@ -169,13 +306,36 @@ cat > config.json <<EOF
     "fade_duration": 0.5,
     "default_duration": 10,
     "backup_media": "empty.png",
-    "background_media": ""
+    "background_media": "empty.png",
+    "time_enabled": false,
+    "time_format": "%H:%M",
+    "time_timezone": "Europe/Berlin",
+    "time_locale": "de",
+    "time_font": "DejaVuSans.ttf",
+    "time_size": 80,
+    "time_color": {"r":1, "g":1, "b":1, "a":1},
+    "time_x": 1820,
+    "time_y": 980,
+    "time_align": "right",
+    "logo_enabled": false,
+    "logo_image": "1x1trans.png",
+    "logo_x": 0,
+    "logo_y": 0,
+    "audio_stream_enabled": false,
+    "audio_stream_url": "",
+    "audio_stream_volume_db": 0
 }
 EOF
 
-# Service im Hintergrund starten (lädt Folien & schreibt manifest.json):
+# Service im Hintergrund starten
+# (lädt Folien & schreibt manifest.json, pusht Zeit per UDP):
 ./service &
 
 # Renderer starten:
-info-beamer .
+INFOBEAMER_STREAMING=1 info-beamer .
 ```
+
+`INFOBEAMER_STREAMING=1` ist auf dem Pi-Standalone-Player nötig, um
+HTTP-URLs in `resource.load_audio` zu erlauben — auf info-beamer
+hosted aktiviert das `runtime.outside_sources` in `package.json` das
+gleiche Verhalten.
