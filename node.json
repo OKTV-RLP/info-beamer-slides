@@ -77,6 +77,13 @@
             "hint": "Wird angezeigt, wenn die Playlist nicht geladen werden kann oder leer ist. Bilder funktionieren auf jedem Pi; Video-Loops setzen Pi 4+ voraus."
         },
         {
+            "title": "Backup-Video Lautstärke (dB)",
+            "name": "backup_volume_db",
+            "type": "float",
+            "default": 0,
+            "hint": "Pegel in Dezibel für das Backup-Video, wenn es als Audio-Quelle aktiv ist. 0 = volle Lautstärke, -10 dB ≈ halb so laut empfunden, ≤ -60 dB = stumm. Bei Backup-Bild irrelevant."
+        },
+        {
             "title": "Hintergrund-Inhalt (Bild oder Video, optional)",
             "name": "background_media",
             "type": "resource",
@@ -86,6 +93,13 @@
             ],
             "default": "empty.png",
             "hint": "Bild oder MP4-Loop hinter den Folien. Bilder funktionieren auf jedem Pi; Video-Loops setzen Pi 4+ voraus. Transparente PNG-Folien lassen den Hintergrund durchscheinen."
+        },
+        {
+            "title": "Hintergrund-Video Lautstärke (dB)",
+            "name": "background_volume_db",
+            "type": "float",
+            "default": 0,
+            "hint": "Pegel in Dezibel für das Hintergrund-Video, wenn es als Audio-Quelle aktiv ist (Stream aus). 0 = volle Lautstärke, ≤ -60 dB = stumm. Bei Hintergrund-Bild irrelevant."
         },
         {
             "title": "Zeit-Overlay",
