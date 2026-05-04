@@ -144,7 +144,7 @@ node.lua       ← Renderer:
 | Option | Default | Beschreibung |
 |---|---|---|
 | Aktivieren | false | Jukebox einschalten |
-| Jukebox-Playlist | leer | Liste von Audio-Resources (MP3/AAC), wird in Reihenfolge abgespielt |
+| Jukebox-Playlist | leer | Liste von Audio-Resources (MP3/AAC), wird in Reihenfolge abgespielt. Neue Einträge sind mit `idle.mp3` (CC0, Brandon Morris, im Package gebündelt) vorbelegt |
 | Zufällige Reihenfolge | false | Beim Start und nach jedem kompletten Durchlauf neu mischen |
 | Lautstärke | 0 dB | dB-Pegel (gleiche Skala wie Stream) |
 
