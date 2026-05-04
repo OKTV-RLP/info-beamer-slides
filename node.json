@@ -271,6 +271,7 @@
                     "valid": [
                         "audio"
                     ],
+                    "default": "idle.mp3",
                     "hint": "Audio-Asset. Wird lokal gecached — keine Netzwerk-Abhängigkeit."
                 }
             ]

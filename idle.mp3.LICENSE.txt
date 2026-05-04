@@ -1,0 +1,14 @@
+idle.mp3
+========
+
+Loading-Screen-Loop von Brandon Morris.
+
+Lizenz: CC0 1.0 (Public Domain Dedication)
+Quelle: https://opengameart.org/content/loading-screen-loop
+
+Im Original aus dem info-beamer-Package
+"package-instore-radio" uebernommen
+(https://github.com/info-beamer/package-instore-radio),
+dort als CC0-Asset deklariert.
+
+CC0-Volltext: https://creativecommons.org/publicdomain/zero/1.0/
