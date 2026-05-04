@@ -335,14 +335,18 @@ end
 -- entweder einen abrupten Wechsel am Fade-Ende oder ein Helligkeits-
 -- Loch in der Mitte des Fades.
 --
--- Lösung: fragment-shader, der beide Texturen sampelt und linear
--- lerpt. info-beamer liefert PNG-Texturen bereits prämultipliziert
--- (tex.rgb = color*A) und composited gegen den Hintergrund-Layer
--- ebenfalls prämultipliziert. In diesem Raum ist die Lerp linear in
--- Farb- UND Alpha-Kanal — ein nochmaliges Premultiplizieren oder ein
--- Unpremultiplizieren am Ende würde halbtransparente Pixel um den
--- Faktor A zusätzlich abdunkeln (sichtbar als Helligkeitsabfall an
--- Fade-Beginn).
+-- Lösung: fragment-shader, der beide Texturen sampelt, in
+-- prämultipliziertem Alpha-Raum lerpt (sodass transparente Pixel
+-- wirklich keinen Color-Beitrag haben) und das Ergebnis als
+-- straight-alpha herausgibt. Der nachgelagerte Standard-Composite
+-- ueber den Hintergrund-Layer ist dann mathematisch korrekt fuer
+-- alle Transparenz-Kombinationen.
+--
+-- WICHTIG: info-beamer liefert PNG-Texturen bereits prämultipliziert
+-- (tex.rgb = color*A). Daher KEIN nochmaliges `a.rgb*a.a` — sonst
+-- waere der Foreground-Beitrag im Shader-Pfad um Faktor A dunkler
+-- als im :draw-Pfad (sichtbar als plötzlicher Helligkeitsabfall an
+-- Fade-Beginn in halbtransparenten Folienbereichen).
 local crossfade_shader
 do
     local ok, sh = pcall(resource.create_shader, [[
@@ -353,7 +357,12 @@ do
         void main() {
             vec4 a = texture2D(from_tex, TexCoord);
             vec4 b = texture2D(to_tex,   TexCoord);
-            gl_FragColor = mix(a, b, progress);
+            vec4 r_pre = mix(a, b, progress);
+            if (r_pre.a > 0.0) {
+                gl_FragColor = vec4(r_pre.rgb / r_pre.a, r_pre.a);
+            } else {
+                gl_FragColor = vec4(0.0);
+            }
         }
     ]])
     if ok then
