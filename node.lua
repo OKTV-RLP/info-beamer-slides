@@ -103,7 +103,7 @@ local pending_slides = nil    -- nächste Liste, swap am Zyklus-Ende
 local outgoing         = nil   -- nil oder {res, dispose_after}
 local cycle_fade_start = 0
 
--- Audio-Routing-Status: "background" | "backup" | "stream" | nil
+-- Audio-Routing-Status: "background" | "backup" | "stream" | "jukebox" | nil
 local audio_active = nil
 
 -- Optionaler HTTP-/Icecast-Audio-Stream via resource.load_audio;
@@ -123,6 +123,44 @@ local audio_stream = {
     buffer       = 5,    -- Sekunden Pre-Buffer
     available    = sys.provides and sys.provides("audio") or false,
 }
+
+-- Optionale Jukebox: lokal gespeicherte Audio-Files (per Setup als
+-- Resources hochgeladen) werden sequenziell oder zufaellig nacheinander
+-- abgespielt. Genau ein Track ist gleichzeitig geladen. Sobald
+-- :state() == "finished" liefert, disposed der Health-Check ihn und
+-- laedt den naechsten Track der Reihenfolge. Bei "error" wird der
+-- gleiche Track nicht endlos retried — wir wechseln direkt zum
+-- naechsten der Liste, sonst koennte ein einzelnes kaputtes File die
+-- gesamte Wiedergabe blockieren.
+--
+-- Reihenfolge: order ist eine Permutation von 1..#files (Sequenz oder
+-- Fisher-Yates-Shuffle). order_pos zeigt auf den zuletzt geladenen
+-- Eintrag. Nach dem Ende der Liste mischt sich order bei shuffle=true
+-- neu — sonst startet sie wieder bei 1.
+local audio_jukebox = {
+    enabled       = false,
+    shuffle       = false,
+    volume        = 1.0,
+    files         = {},     -- {dateiname, ...}
+    order         = {},     -- Indizes in files (Sequenz oder Shuffle)
+    order_pos     = 0,
+    res           = nil,
+    loaded_file   = nil,
+    last_state    = nil,
+    last_attempt  = -math.huge,
+    retry_after   = 2,      -- Cooldown zwischen Load-Versuchen (Schutz
+                            -- gegen Reload-Sturm bei wiederholten
+                            -- Fehlern; bei normalen Track-Wechseln
+                            -- vernachlaessigbar, weil last_attempt nur
+                            -- im load_jukebox_track() gesetzt wird)
+    available     = sys.provides and sys.provides("audio") or false,
+}
+
+-- Math-RNG einmalig seeden, damit Shuffle nicht in jeder Session
+-- identisch laeuft. sys.now() liefert eine Float-Sekunde seit
+-- Knoten-Start; das genuegt fuer die Audio-Reihenfolge (kein
+-- Krypto-Bedarf).
+math.randomseed(math.floor((sys.now() or 0) * 1000) + 1)
 
 ------------------------------------------------------------
 -- Hilfsfunktionen
@@ -441,22 +479,165 @@ local function check_audio_stream_health()
     end
 end
 
+-- Fisher-Yates-Shuffle in-place.
+local function shuffle_array(arr)
+    for i = #arr, 2, -1 do
+        local j = math.random(i)
+        arr[i], arr[j] = arr[j], arr[i]
+    end
+end
+
+-- order neu aufbauen: Sequenz 1..N, optional gemischt. Der
+-- Health-Check inkrementiert order_pos vor dem Load — Start mit 0
+-- bedeutet: naechster Load liest order[1].
+--
+-- Wenn waehrend des Rebuilds gerade ein Track laeuft, richten wir
+-- order_pos so aus, dass er auf seine neue Position in der Reihenfolge
+-- zeigt. Dadurch laedt der naechste Wechsel den darauffolgenden Track
+-- der neuen Reihenfolge, statt versehentlich wieder bei order[1]
+-- anzufangen (was den gerade beendeten Track erneut spielen koennte).
+-- Ist der laufende Track nicht (mehr) in der Liste, faellt order_pos
+-- auf 0 zurueck — der naechste Load startet dann sauber von vorn.
+local function rebuild_jukebox_order()
+    audio_jukebox.order = {}
+    for i = 1, #audio_jukebox.files do
+        audio_jukebox.order[i] = i
+    end
+    if audio_jukebox.shuffle then
+        shuffle_array(audio_jukebox.order)
+    end
+
+    audio_jukebox.order_pos = 0
+    if audio_jukebox.loaded_file then
+        for pos, idx in ipairs(audio_jukebox.order) do
+            if audio_jukebox.files[idx] == audio_jukebox.loaded_file then
+                audio_jukebox.order_pos = pos
+                break
+            end
+        end
+    end
+end
+
+local function dispose_jukebox_track()
+    if audio_jukebox.res then
+        pcall(function() audio_jukebox.res:dispose() end)
+    end
+    audio_jukebox.res         = nil
+    audio_jukebox.loaded_file = nil
+    audio_jukebox.last_state  = nil
+end
+
+-- Naechsten Filenamen aus der Reihenfolge holen. Am Listenende neu
+-- mischen (falls shuffle aktiv) und wieder von vorn.
+local function jukebox_next_file()
+    if #audio_jukebox.order == 0 then return nil end
+    audio_jukebox.order_pos = audio_jukebox.order_pos + 1
+    if audio_jukebox.order_pos > #audio_jukebox.order then
+        if audio_jukebox.shuffle then
+            shuffle_array(audio_jukebox.order)
+        end
+        audio_jukebox.order_pos = 1
+    end
+    local idx = audio_jukebox.order[audio_jukebox.order_pos]
+    return audio_jukebox.files[idx]
+end
+
+-- Naechsten Track laden, gemutet starten. update_audio_routing
+-- entscheidet pro Frame, ob die Jukebox tatsaechlich hoerbar wird.
+local function load_jukebox_track()
+    audio_jukebox.last_attempt = sys.now()
+
+    local file = jukebox_next_file()
+    if not file then return end
+
+    local ok, r = pcall(resource.load_audio, {
+        file   = file,
+        paused = true,
+    })
+    if ok and r then
+        audio_jukebox.res         = r
+        audio_jukebox.loaded_file = file
+        audio_jukebox.last_state  = nil
+        pcall(function() r:volume(0) end)   -- gemutet starten
+        pcall(function() r:start() end)      -- Decoder anwerfen
+        audio_active = nil                   -- Routing-Neuevaluation
+        print("Jukebox-Track geladen: " .. file)
+    else
+        audio_jukebox.res         = nil
+        audio_jukebox.loaded_file = nil
+        print(string.format(
+            "Jukebox-Track nicht ladbar: %s (Fehler: %s)",
+            file, tostring(r)
+        ))
+    end
+end
+
+-- Wird pro Frame aufgerufen. Disposed den aktuellen Track, sobald
+-- er fertig oder fehlerhaft ist; laedt den naechsten nach Cooldown.
+-- Keine endlosen Retry-Schleifen auf demselben File: bei "error"
+-- ruecken wir in der Reihenfolge weiter.
+--
+-- Bei aktivem Stream (Stream > Jukebox in der Routing-Prioritaet, kein
+-- Fallback) wird die Jukebox nie hoerbar — wir disposen den Decoder
+-- und laden nichts neu, statt unnoetig Resourcen zu verbrennen. Sobald
+-- der Stream im Setup deaktiviert wird, springt der Watchdog wieder
+-- an.
+local function check_audio_jukebox_health()
+    if not audio_jukebox.available then return end
+
+    local stream_dominates = audio_stream.enabled
+
+    if not audio_jukebox.enabled
+       or #audio_jukebox.files == 0
+       or stream_dominates then
+        if audio_jukebox.res then
+            dispose_jukebox_track()
+        end
+        return
+    end
+
+    if audio_jukebox.res then
+        local ok, st = pcall(function() return audio_jukebox.res:state() end)
+        if ok then
+            audio_jukebox.last_state = st
+            if st == "finished" or st == "error" then
+                if st == "error" then
+                    print(string.format(
+                        "Jukebox-Track-Fehler: %s — naechster Track",
+                        tostring(audio_jukebox.loaded_file)
+                    ))
+                end
+                dispose_jukebox_track()
+            end
+        end
+    end
+
+    if not audio_jukebox.res
+       and sys.now() - audio_jukebox.last_attempt >= audio_jukebox.retry_after then
+        load_jukebox_track()
+    end
+end
+
 local function update_audio_routing()
     -- Audio-Quellen mit Prioritaet:
     --   1. BACKUP-Video (in IDLE mit Backup als Video)
     --   2. Stream (wenn audio_stream.enabled + Resource ready)
-    --   3. BG-Video (nur wenn mit Audio geladen, d. h.
-    --      audio_stream.enabled = false → BG hat audio_loaded = true)
-    -- Kein dynamisches Fallback bei Stream-Ausfall: ist der Stream
-    -- konfiguriert aber gerade nicht ladbar, bleibt's stumm — wir
-    -- wechseln NICHT auf BG-Video-Audio (das ist sowieso ohne Audio
-    -- geladen, solange der Stream konfiguriert ist).
+    --   3. Jukebox (wenn audio_jukebox.enabled + Resource ready)
+    --   4. BG-Video (nur wenn mit Audio geladen — d. h. weder Stream
+    --      noch Jukebox aktiviert, sonst hat BG audio_loaded = false)
+    -- Kein dynamisches Fallback zwischen Stream/Jukebox/BG bei Ausfall
+    -- der hoeher priorisierten Quelle: ist Stream konfiguriert aber
+    -- gerade nicht ladbar, bleibt's stumm — wir wechseln NICHT auf
+    -- Jukebox/BG-Audio. Konsistent mit Setup-Erwartung "wenn Stream
+    -- aktiv, dominiert er".
     local target
     if state == STATE_IDLE
        and backup_slot.kind == "video" and backup_slot.res then
         target = "backup"
     elseif audio_stream.enabled then
         if audio_stream.res then target = "stream" end
+    elseif audio_jukebox.enabled then
+        if audio_jukebox.res then target = "jukebox" end
     elseif background_slot.kind == "video"
        and background_slot.res
        and background_slot.audio_loaded then
@@ -469,9 +650,9 @@ local function update_audio_routing()
     -- auch den Frame-Strom — fuer Backup egal weil off-screen, fuer
     -- BG nur dann aufgerufen, wenn es ueberhaupt mit Audio geladen
     -- ist; sonst gibt's nichts zu muten und :stop() wuerde nur den
-    -- Visual-Freeze ausloesen). Beim Stream :volume(0), damit der
-    -- Decoder verbunden bleibt und ein Reaktivieren ohne Reconnect-
-    -- Latenz hoerbar ist.
+    -- Visual-Freeze ausloesen). Beim Stream/Jukebox :volume(0), damit
+    -- der Decoder verbunden bleibt und ein Reaktivieren ohne Latenz
+    -- hoerbar ist.
     if target ~= "backup"
        and backup_slot.kind == "video" and backup_slot.res then
         pcall(function() backup_slot.res:stop() end)
@@ -485,6 +666,9 @@ local function update_audio_routing()
     if target ~= "stream" and audio_stream.res then
         pcall(function() audio_stream.res:volume(0) end)
     end
+    if target ~= "jukebox" and audio_jukebox.res then
+        pcall(function() audio_jukebox.res:volume(0) end)
+    end
 
     -- Aktiviere Ziel.
     if target == "backup" then
@@ -493,6 +677,8 @@ local function update_audio_routing()
         video_play(background_slot)
     elseif target == "stream" and audio_stream.res then
         pcall(function() audio_stream.res:volume(audio_stream.volume) end)
+    elseif target == "jukebox" and audio_jukebox.res then
+        pcall(function() audio_jukebox.res:volume(audio_jukebox.volume) end)
     end
 
     audio_active = target
@@ -596,14 +782,69 @@ util.file_watch("config.json", function(raw)
     CONFIG.fade_duration    = tonumber(cfg.fade_duration)    or 0.5
     CONFIG.default_duration = tonumber(cfg.default_duration) or 10
 
-    -- Audio-Stream-Zustand ZUERST lesen — bestimmt, ob das Hintergrund-
-    -- Video mit oder ohne Audio-Track geladen wird (s. background_slot
-    -- Kommentar). update_media_slot disposed+reloadet das BG-Video
-    -- automatisch beim Toggle.
+    -- Audio-Stream- UND Jukebox-Zustand ZUERST lesen — beide bestimmen
+    -- gemeinsam, ob das Hintergrund-Video mit oder ohne Audio-Track
+    -- geladen wird (s. background_slot-Kommentar). Sobald eine der
+    -- beiden Quellen aktiv ist, soll BG-Video stumm laufen (visuell
+    -- durchgehend, Audio kommt von hoeher priorisierter Quelle).
+    -- update_media_slot disposed+reloadet das BG-Video automatisch beim
+    -- Toggle ueber den slot.audio_loaded-Vergleich.
     audio_stream.enabled = cfg.audio_stream_enabled and true or false
     audio_stream.url     = cfg.audio_stream_url or ""
     audio_stream.volume  = db_to_linear(tonumber(cfg.audio_stream_volume_db))
-    background_slot.audio = not audio_stream.enabled
+
+    -- Jukebox-Playlist parsen. Reihenfolge im Setup ist Reihenfolge
+    -- der sequenziellen Wiedergabe. Leere/ungueltige Eintraege werden
+    -- uebersprungen (Setup-Liste kann in info-beamer leere Slots haben).
+    local new_files = {}
+    if type(cfg.audio_jukebox_playlist) == "table" then
+        for _, item in ipairs(cfg.audio_jukebox_playlist) do
+            local name = item and resolve_resource(item.file)
+            if name then
+                new_files[#new_files + 1] = name
+            end
+        end
+    end
+
+    local new_shuffle = cfg.audio_jukebox_shuffle and true or false
+
+    -- Aenderungen im laufenden Betrieb so schonend wie moeglich
+    -- behandeln: Track laeuft weiter, wenn er noch in der Liste ist.
+    local files_changed = (#new_files ~= #audio_jukebox.files)
+    if not files_changed then
+        for i, f in ipairs(new_files) do
+            if f ~= audio_jukebox.files[i] then
+                files_changed = true
+                break
+            end
+        end
+    end
+    local shuffle_changed = (new_shuffle ~= audio_jukebox.shuffle)
+
+    audio_jukebox.enabled = cfg.audio_jukebox_enabled and true or false
+    audio_jukebox.shuffle = new_shuffle
+    audio_jukebox.volume  = db_to_linear(tonumber(cfg.audio_jukebox_volume_db))
+    audio_jukebox.files   = new_files
+
+    if files_changed or shuffle_changed then
+        rebuild_jukebox_order()
+        -- Wenn der gerade gespielte Track aus der Liste entfernt wurde,
+        -- direkt disposen — der Health-Check laedt dann den naechsten.
+        if audio_jukebox.loaded_file then
+            local still_present = false
+            for _, f in ipairs(new_files) do
+                if f == audio_jukebox.loaded_file then
+                    still_present = true
+                    break
+                end
+            end
+            if not still_present then
+                dispose_jukebox_track()
+            end
+        end
+    end
+
+    background_slot.audio = not (audio_stream.enabled or audio_jukebox.enabled)
 
     update_media_slot(backup_slot,     cfg.backup_media,     "empty.png")
     update_media_slot(background_slot, cfg.background_media, nil)
@@ -639,6 +880,9 @@ util.file_watch("config.json", function(raw)
     -- damit BG-Video-Reload den richtigen Audio-Modus bekommt.)
     if audio_active == "stream" and audio_stream.res then
         pcall(function() audio_stream.res:volume(audio_stream.volume) end)
+    end
+    if audio_active == "jukebox" and audio_jukebox.res then
+        pcall(function() audio_jukebox.res:volume(audio_jukebox.volume) end)
     end
 
     -- Slot-Wechsel können das Audio-Ziel verändern (Disposal des
@@ -813,6 +1057,7 @@ end
 
 function node.render()
     check_audio_stream_health()
+    check_audio_jukebox_health()
     update_audio_routing()
 
     local t = now()

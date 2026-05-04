@@ -60,6 +60,9 @@ node.lua       ← Renderer:
   als Vollformat-Vorlage).
 - Optionaler HTTP-/Icecast-Audio-Stream als Hintergrundton mit
   konfigurierbarem dB-Pegel und automatischem Reconnect bei Abriss.
+- Optionale Jukebox: lokal hochgeladene Audio-Dateien werden als
+  Endlos-Playlist (sequenziell oder zufällig) abgespielt — kein
+  Netzwerk-Bedarf, läuft auch offline.
 
 ## Installation
 
@@ -75,7 +78,10 @@ node.lua       ← Renderer:
 6. **Optional Cornerlogo**: aktivieren und Asset wählen.
 7. **Optional Audio-Stream**: aktivieren und Stream-URL eintragen
    (siehe Voraussetzungen unten).
-8. Setup einem Device zuweisen.
+8. **Optional Audio-Jukebox**: Audio-Dateien als Resources hochladen,
+   in der Setup-Liste *Jukebox-Playlist* in gewünschter Reihenfolge
+   eintragen, ggf. *Zufällige Reihenfolge* aktivieren.
+9. Setup einem Device zuweisen.
 
 ## Konfigurationsoptionen
 
@@ -132,6 +138,15 @@ node.lua       ← Renderer:
 | Aktivieren | false | Audio-Stream einschalten |
 | Stream-URL | – | z. B. `http://stream.example.com:8000/radio.mp3` |
 | Lautstärke | 0 dB | dB-Pegel (0 = voll, –20 dB = leise, ≤ –60 dB = stumm) |
+
+### Hintergrund-Audio (Jukebox)
+
+| Option | Default | Beschreibung |
+|---|---|---|
+| Aktivieren | false | Jukebox einschalten |
+| Jukebox-Playlist | leer | Liste von Audio-Resources (MP3/AAC), wird in Reihenfolge abgespielt |
+| Zufällige Reihenfolge | false | Beim Start und nach jedem kompletten Durchlauf neu mischen |
+| Lautstärke | 0 dB | dB-Pegel (gleiche Skala wie Stream) |
 
 ## HTTP/HTTPS und self-signed-Zertifikate
 
@@ -221,8 +236,8 @@ wer das Logo nutzen will, lädt sein eigenes Asset hoch.
 ## Hintergrund-Audio (Icecast/HTTP-Stream)
 
 Optionaler Audio-Stream als Hintergrundton, geladen via
-`resource.load_audio`. MP3-Icecast-Streams sind am zuverlässigsten;
-HLS, AAC, Ogg sollten ebenfalls funktionieren.
+`resource.load_audio`. MP3/AAC-Icecast-Streams sind zuverlässig;
+HLS oder andere Container und Codecs sollten ebenfalls funktionieren.
 
 **Voraussetzungen:**
 - `runtime.outside_sources = true` in `package.json` (im Package
@@ -239,6 +254,36 @@ praktisch stumm. Werte > 0 werden auf 0 begrenzt (info-beamers
 Decoder-State (`error`/`finished`) und versucht nach 5 s eine
 Neuverbindung. Kein dynamischer Audio-Fallback auf Hintergrund-Video.
 
+## Hintergrund-Audio (Jukebox)
+
+Lokal gespeicherte Audio-Dateien als Dauerhintergrundmusik — Alternative
+zum Streaming, läuft auch ohne Netz. Tracks werden als info-beamer-
+Resources hochgeladen und über die Setup-Liste *Jukebox-Playlist* in der
+gewünschten Reihenfolge zusammengestellt.
+
+**Wiedergabe-Logik:** genau ein Track ist gleichzeitig per
+`resource.load_audio` geladen. Sobald `:state()` `finished` liefert,
+disposed der Watchdog ihn und lädt den nächsten Eintrag der Reihenfolge.
+Liefert ein einzelner Track `error`, springt die Logik direkt zum
+nächsten Eintrag — ein einzelnes kaputtes File blockiert nicht die ganze
+Playlist.
+
+**Reihenfolge:** standardmäßig sequenziell von oben nach unten. Mit
+*Zufällige Reihenfolge* wird beim ersten Start und nach jedem kompletten
+Durchlauf per Fisher-Yates neu gemischt — innerhalb eines Durchlaufs
+spielt jeder Track genau einmal, bevor der nächste Mix beginnt.
+
+**Live-Edit-Verhalten:** wird die Playlist im Setup geändert, läuft der
+gerade spielende Track weiter, wenn er noch in der Liste enthalten ist.
+Andernfalls wird er sofort disposed und der nächste Track aus der neuen
+Reihenfolge gestartet. Toggle der Shuffle-Option mischt die Reihenfolge
+neu, ohne den aktuellen Track zu unterbrechen.
+
+**Voraussetzungen:** identisch zum Stream — `sys.provides("audio")` auf
+der Hardware. Da nur lokale Files gelesen werden, ist
+`runtime.outside_sources` für die Jukebox nicht nötig (für den Stream
+ist es bereits gesetzt).
+
 ## Audio-Routing-Prioritäten
 
 Audio kommt von genau einer Quelle gleichzeitig. Priorität:
@@ -246,18 +291,28 @@ Audio kommt von genau einer Quelle gleichzeitig. Priorität:
 1. **Backup-Video** (im IDLE-Zustand mit Backup als Video) — höchste
    Priorität.
 2. **Audio-Stream** (wenn aktiviert + Verbindung steht).
-3. **Hintergrund-Video** (Default-Quelle, wenn obige aus oder nicht
+3. **Audio-Jukebox** (wenn aktiviert + Track geladen).
+4. **Hintergrund-Video** (Default-Quelle, wenn obige aus oder nicht
    anwendbar).
 
-**Stream-Toggle-Verhalten:** beim Ein-/Ausschalten des Audio-Streams
-wird das Hintergrund-Video disposed und mit passendem Audio-Modus neu
-geladen (kurzer visueller Glitch von Bruchteilen einer Sekunde):
+Kein dynamischer Fallback zwischen Stream/Jukebox/BG bei Ausfall der
+höher priorisierten Quelle: ist Stream konfiguriert, aber gerade nicht
+ladbar, bleibt's stumm — die Jukebox übernimmt **nicht** automatisch.
+Wer ohne Netzverbindung Musik hören will, deaktiviert den Stream und
+nutzt die Jukebox.
 
-- Stream **aus** → BG-Video lädt mit `audio = true`, kann Audio liefern.
-- Stream **an** → BG-Video lädt mit `audio = false` und läuft visuell
-  durchgehend; Audio kommt vom Stream. Grund: info-beamers
-  `:stop()` pausiert Video- und Audio-Decoder gemeinsam — wir können
-  nicht gezielt nur den Audio-Track muten.
+**Toggle-Verhalten Stream/Jukebox:** beim Ein-/Ausschalten von Stream
+**oder** Jukebox wird das Hintergrund-Video disposed und mit passendem
+Audio-Modus neu geladen (kurzer visueller Glitch von Bruchteilen einer
+Sekunde):
+
+- Stream **und** Jukebox **aus** → BG-Video lädt mit `audio = true`,
+  kann Audio liefern.
+- Stream **oder** Jukebox **an** → BG-Video lädt mit `audio = false` und
+  läuft visuell durchgehend; Audio kommt von der höher priorisierten
+  Quelle. Grund: info-beamers `:stop()` pausiert Video- und Audio-
+  Decoder gemeinsam — wir können nicht gezielt nur den Audio-Track
+  muten.
 
 ## Voraussetzungen
 
@@ -323,7 +378,11 @@ cat > config.json <<EOF
     "logo_y": 0,
     "audio_stream_enabled": false,
     "audio_stream_url": "",
-    "audio_stream_volume_db": 0
+    "audio_stream_volume_db": 0,
+    "audio_jukebox_enabled": false,
+    "audio_jukebox_playlist": [],
+    "audio_jukebox_shuffle": false,
+    "audio_jukebox_volume_db": 0
 }
 EOF
 
