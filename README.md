@@ -144,7 +144,7 @@ node.lua       ← Renderer:
 | Option | Default | Beschreibung |
 |---|---|---|
 | Aktivieren | false | Jukebox einschalten |
-| Jukebox-Playlist | leer | Liste von Audio-Resources (MP3/Ogg/Flac), wird in Reihenfolge abgespielt |
+| Jukebox-Playlist | leer | Liste von Audio-Resources (MP3/AAC), wird in Reihenfolge abgespielt |
 | Zufällige Reihenfolge | false | Beim Start und nach jedem kompletten Durchlauf neu mischen |
 | Lautstärke | 0 dB | dB-Pegel (gleiche Skala wie Stream) |
 
@@ -236,8 +236,8 @@ wer das Logo nutzen will, lädt sein eigenes Asset hoch.
 ## Hintergrund-Audio (Icecast/HTTP-Stream)
 
 Optionaler Audio-Stream als Hintergrundton, geladen via
-`resource.load_audio`. MP3-Icecast-Streams sind am zuverlässigsten;
-HLS, AAC, Ogg sollten ebenfalls funktionieren.
+`resource.load_audio`. MP3/AAC-Icecast-Streams sind zuverlässig;
+HLS oder andere Container und Codecs sollten ebenfalls funktionieren.
 
 **Voraussetzungen:**
 - `runtime.outside_sources = true` in `package.json` (im Package

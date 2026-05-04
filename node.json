@@ -271,7 +271,7 @@
                     "valid": [
                         "audio"
                     ],
-                    "hint": "MP3/Ogg/Flac-Asset. Wird im Package-Verzeichnis abgelegt und lokal von der SD-Karte abgespielt — keine Netzwerk-Abhängigkeit."
+                    "hint": "Audio-Asset. Wird lokal gecached — keine Netzwerk-Abhängigkeit."
                 }
             ]
         },
