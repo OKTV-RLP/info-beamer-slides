@@ -225,7 +225,7 @@
         {
             "title": "Hintergrund-Audio (Stream)",
             "type": "section",
-            "intro": "Optionaler HTTP-/Icecast-Stream. Priorität: Backup-Video-Audio > Stream > Hintergrund-Video-Audio. Pi 4+ erforderlich."
+            "intro": "Optionaler HTTP-/Icecast-Stream. Priorität: Backup-Video-Audio > Stream > Jukebox > Hintergrund-Video-Audio. Pi 4+ erforderlich."
         },
         {
             "title": "Hintergrund-Audio aktivieren",
@@ -246,6 +246,48 @@
             "type": "float",
             "default": 0,
             "hint": "Pegel in Dezibel. 0 = volle Lautstärke, -6 dB ≈ halbe Amplitude, -20 dB = leiser Hintergrund, ≤ -60 dB = stumm. Werte > 0 werden auf 0 begrenzt. Änderung wird im laufenden Betrieb sofort übernommen."
+        },
+        {
+            "title": "Hintergrund-Audio (Jukebox)",
+            "type": "section",
+            "intro": "Lokal gespeicherte Audio-Dateien als Hintergrundmusik. Priorität: Backup-Video-Audio > Stream > Jukebox > Hintergrund-Video-Audio. Wenn der Stream aktiviert ist, gewinnt er — die Jukebox bleibt stumm. Pi 4+ und sys.provides('audio') erforderlich."
+        },
+        {
+            "title": "Jukebox aktivieren",
+            "name": "audio_jukebox_enabled",
+            "type": "boolean",
+            "default": false
+        },
+        {
+            "title": "Jukebox-Playlist",
+            "name": "audio_jukebox_playlist",
+            "type": "list",
+            "itemname": "Track",
+            "items": [
+                {
+                    "title": "Audio-Datei",
+                    "name": "file",
+                    "type": "resource",
+                    "valid": [
+                        "audio"
+                    ],
+                    "hint": "MP3/Ogg/Flac-Asset. Wird im Package-Verzeichnis abgelegt und lokal von der SD-Karte abgespielt — keine Netzwerk-Abhängigkeit."
+                }
+            ]
+        },
+        {
+            "title": "Zufällige Reihenfolge",
+            "name": "audio_jukebox_shuffle",
+            "type": "boolean",
+            "default": false,
+            "hint": "Wenn aktiviert, wird die Playlist beim Start und nach jedem kompletten Durchlauf neu gemischt. Sonst sequenziell von oben nach unten."
+        },
+        {
+            "title": "Jukebox-Lautstärke (dB)",
+            "name": "audio_jukebox_volume_db",
+            "type": "float",
+            "default": 0,
+            "hint": "Pegel in Dezibel. 0 = volle Lautstärke, -6 dB ≈ halbe Amplitude, -20 dB = leiser Hintergrund, ≤ -60 dB = stumm. Werte > 0 werden auf 0 begrenzt."
         }
     ]
 }
