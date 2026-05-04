@@ -148,7 +148,11 @@ local audio_jukebox = {
     loaded_file   = nil,
     last_state    = nil,
     last_attempt  = -math.huge,
-    retry_after   = 2,      -- kurze Pause zwischen Tracks
+    retry_after   = 2,      -- Cooldown zwischen Load-Versuchen (Schutz
+                            -- gegen Reload-Sturm bei wiederholten
+                            -- Fehlern; bei normalen Track-Wechseln
+                            -- vernachlaessigbar, weil last_attempt nur
+                            -- im load_jukebox_track() gesetzt wird)
     available     = sys.provides and sys.provides("audio") or false,
 }
 
@@ -486,6 +490,14 @@ end
 -- order neu aufbauen: Sequenz 1..N, optional gemischt. Der
 -- Health-Check inkrementiert order_pos vor dem Load — Start mit 0
 -- bedeutet: naechster Load liest order[1].
+--
+-- Wenn waehrend des Rebuilds gerade ein Track laeuft, richten wir
+-- order_pos so aus, dass er auf seine neue Position in der Reihenfolge
+-- zeigt. Dadurch laedt der naechste Wechsel den darauffolgenden Track
+-- der neuen Reihenfolge, statt versehentlich wieder bei order[1]
+-- anzufangen (was den gerade beendeten Track erneut spielen koennte).
+-- Ist der laufende Track nicht (mehr) in der Liste, faellt order_pos
+-- auf 0 zurueck — der naechste Load startet dann sauber von vorn.
 local function rebuild_jukebox_order()
     audio_jukebox.order = {}
     for i = 1, #audio_jukebox.files do
@@ -494,7 +506,16 @@ local function rebuild_jukebox_order()
     if audio_jukebox.shuffle then
         shuffle_array(audio_jukebox.order)
     end
+
     audio_jukebox.order_pos = 0
+    if audio_jukebox.loaded_file then
+        for pos, idx in ipairs(audio_jukebox.order) do
+            if audio_jukebox.files[idx] == audio_jukebox.loaded_file then
+                audio_jukebox.order_pos = pos
+                break
+            end
+        end
+    end
 end
 
 local function dispose_jukebox_track()
@@ -555,10 +576,20 @@ end
 -- er fertig oder fehlerhaft ist; laedt den naechsten nach Cooldown.
 -- Keine endlosen Retry-Schleifen auf demselben File: bei "error"
 -- ruecken wir in der Reihenfolge weiter.
+--
+-- Bei aktivem Stream (Stream > Jukebox in der Routing-Prioritaet, kein
+-- Fallback) wird die Jukebox nie hoerbar — wir disposen den Decoder
+-- und laden nichts neu, statt unnoetig Resourcen zu verbrennen. Sobald
+-- der Stream im Setup deaktiviert wird, springt der Watchdog wieder
+-- an.
 local function check_audio_jukebox_health()
     if not audio_jukebox.available then return end
 
-    if not audio_jukebox.enabled or #audio_jukebox.files == 0 then
+    local stream_dominates = audio_stream.enabled
+
+    if not audio_jukebox.enabled
+       or #audio_jukebox.files == 0
+       or stream_dominates then
         if audio_jukebox.res then
             dispose_jukebox_track()
         end
