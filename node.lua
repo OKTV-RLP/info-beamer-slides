@@ -216,6 +216,13 @@ end
 
 -- Typ eines Media-Assets bestimmen: zuerst Hosted-Metadaten, sonst über
 -- die Endung erraten. Default ist "image" — funktioniert auf jedem Pi.
+-- Endungs-Whitelist konservativ: info-beamer dokumentiert nur MP4 als
+-- Video-Container; m4v ist Suffix-Variante, mov teilt das ISO-BMFF-
+-- Layout und wird vom MMAL-Demuxer in der Praxis akzeptiert. webm/
+-- mkv/avi sind nicht als unterstuetzt dokumentiert — solche Dateien
+-- werden als "image" eingestuft und scheitern beim Image-Load mit
+-- klarer Fehlermeldung, statt im Video-Pfad undefiniert wegzubrechen.
+-- Identische Liste wie VIDEO_EXTENSIONS im service-Sidecar.
 local function media_type_for(value, name)
     if type(value) == "table" then
         if value.type == "video" then return "video" end
@@ -223,8 +230,7 @@ local function media_type_for(value, name)
     end
     if name then
         local ext = name:lower():match("%.([%w]+)$") or ""
-        if ext == "mp4" or ext == "webm" or ext == "mov"
-           or ext == "mkv" or ext == "m4v" or ext == "avi" then
+        if ext == "mp4" or ext == "m4v" or ext == "mov" then
             return "video"
         end
     end
