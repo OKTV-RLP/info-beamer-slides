@@ -165,6 +165,26 @@ local audio_stream = {
     available    = sys.provides and sys.provides("audio") or false,
 }
 
+-- Erreichbarkeits-Probe vom Sidecar (UDP-IPC, Path "audio_probe").
+-- Schickt im 3..5-s-Takt "ok" oder "fail", je nachdem ob ein
+-- HTTP-GET an audio_stream.url einen Status < 400 zurueckliefert.
+-- Solange ok ~= true (Probe-Resultat fail oder noch keine Probe
+-- empfangen), unterdrueckt check_audio_stream_health jeden
+-- (Re)load-Versuch. Hintergrund: ein bekannter SIGSEGV im info-
+-- beamer-Audio-Worker beim Verarbeiten unereichbarer URLs (404,
+-- DNS-Fail, Conn-Refused, Timeout) reisst ohne diesen Schutz den
+-- gesamten Knoten samt Watchdog im Sekundentakt mit. Aus Lua
+-- nicht abfangbar (Crash im nativen Worker-Thread).
+--
+-- stale_after: laeuft die Probe aus (Sidecar tot/haengt), faellt
+-- ok auf nil zurueck und der Reload-Gate blockt — sicherer
+-- Default. Lieber stumm als Crash-Loop.
+local audio_probe = {
+    ok           = nil,
+    last_msg_at  = -math.huge,
+    stale_after  = 30,
+}
+
 -- Optionale Jukebox: lokal gespeicherte Audio-Files (per Setup als
 -- Resources hochgeladen) werden sequenziell oder zufaellig nacheinander
 -- abgespielt. Genau ein Track ist gleichzeitig geladen. Sobald
@@ -554,10 +574,20 @@ local function check_audio_stream_health()
         end
     end
 
-    -- (Re)load nach Cooldown.
+    -- (Re)load nach Cooldown — nur wenn der Sidecar-Probe die URL
+    -- gerade als erreichbar bestaetigt. Verhindert SIGSEGV im
+    -- Audio-Worker bei kaputten URLs (Details s. audio_probe).
+    -- Probe muss frisch sein (stale_after-Fenster), sonst gilt der
+    -- letzte Wert als unsicher und wir blocken konservativ.
+    -- Bei fehlgeschlagener Probe wird kein last_attempt gesetzt —
+    -- sobald die Probe wieder ok wird, soll im selben Frame
+    -- geladen werden (kein zusaetzlicher retry_after-Cooldown).
     if not audio_stream.res
        and sys.now() - audio_stream.last_attempt >= audio_stream.retry_after then
-        load_audio_stream()
+        local probe_fresh = sys.now() - audio_probe.last_msg_at < audio_probe.stale_after
+        if probe_fresh and audio_probe.ok == true then
+            load_audio_stream()
+        end
     end
 end
 
@@ -1094,6 +1124,13 @@ end)
 util.data_mapper{
     time = function(msg)
         time_overlay.text = msg or ""
+    end,
+    -- Erreichbarkeits-Probe-Resultat vom Sidecar. Werte: "ok" |
+    -- "fail". Steuert den Reload-Gate in check_audio_stream_health
+    -- (Details s. audio_probe-Tabelle).
+    audio_probe = function(msg)
+        audio_probe.last_msg_at = sys.now()
+        audio_probe.ok = (msg == "ok")
     end,
 }
 

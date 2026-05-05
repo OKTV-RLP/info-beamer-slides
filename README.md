@@ -17,16 +17,20 @@ service        ← Python-Sidecar:
                      schreibt manifest.json
                    • berechnet Lokalzeit (pytz) und pusht
                      den Anzeigetext via UDP-IPC
+                   • probt regelmäßig die Audio-Stream-URL
+                     und pusht ok/fail via UDP-IPC
                        │
                        ▼
                  manifest.json + slide_*.png (Folien-Dateien
                  mit Prefix im Knoten-Wurzelverzeichnis)
                  +  UDP localhost:4444 → "root/time:<text>"
+                                       → "root/audio_probe:ok|fail"
                        │
                        ▼
 node.lua       ← Renderer:
                    • liest manifest via util.json_watch
-                   • empfängt Zeit via util.data_mapper{ time = … }
+                   • empfängt Zeit + Audio-Probe via
+                     util.data_mapper{ time, audio_probe }
                    • rendert mit Crossfade-Shader (prämultiplizierter
                      Alpha-Lerp), Zeit-Overlay, Cornerlogo
 ```
@@ -253,6 +257,23 @@ praktisch stumm. Werte > 0 werden auf 0 begrenzt (info-beamers
 **Reconnect:** Wenn der Stream abreißt, erkennt der Watchdog den
 Decoder-State (`error`/`finished`) und versucht nach 5 s eine
 Neuverbindung. Kein dynamischer Audio-Fallback auf Hintergrund-Video.
+
+**Crash-Schutz (Sidecar-Probe):** Der `service`-Sidecar fragt die
+Stream-URL alle 3–5 s mit einem Range-GET ab und meldet `ok` /
+`fail` per UDP-IPC an den Renderer. `resource.load_audio` wird nur
+ausgeführt, wenn die letzte Probe `ok` und nicht älter als 30 s
+ist. Hintergrund: in info-beamer hosted (stable-0016) gibt es
+einen reproduzierbaren SIGSEGV im Audio-Worker, sobald
+`resource.load_audio` mit einer URL aufgerufen wird, die der
+Server gerade nicht bedient (404, DNS-Fehler, Conn-Refused,
+Timeout). Der Crash nimmt den ganzen Prozess mit, der Watchdog
+startet neu, und solange die URL kaputt bleibt, entsteht eine
+Restart-Schleife im Sekundentakt — Bildschirm permanent schwarz,
+auch andere Slides werden nicht mehr gerendert. Aus Lua nicht
+abfangbar (nativer Worker-Thread). Mit der Probe sieht der Worker
+nie eine kaputte URL; bei Stream-Ausfall bleibt das Audio einfach
+stumm, alle anderen Inhalte (BG-Video, Slides, Logo, Zeit) laufen
+ungestört weiter.
 
 ## Hintergrund-Audio (Jukebox)
 

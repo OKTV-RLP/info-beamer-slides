@@ -178,6 +178,108 @@ def push_time(text):
         log("Zeit-IPC fehlgeschlagen: %s" % e)
 
 
+# ============================================================
+# Audio-Stream-Probe: prueft per HTTP, ob die im Setup
+# konfigurierte Stream-URL gerade erreichbar ist, und sendet das
+# Ergebnis per UDP-IPC an den Lua-Knoten (data_mapper-Path
+# 'audio_probe').
+#
+# Hintergrund: in info-beamer (hosted, stable-0016) gibt es einen
+# bekannten SIGSEGV im Audio-Worker, sobald resource.load_audio mit
+# einer URL aufgerufen wird, die der Server nicht oder nicht mehr
+# bedient (404, DNS-Fail, Conn-Refused, Timeout, ...). Der Crash
+# nimmt den ganzen info-beamer-Prozess mit; Watchdog startet neu;
+# falls die URL weiter unereichbar bleibt, entsteht eine Restart-
+# Schleife im Sekundentakt — Bildschirm wird permanent schwarz, bis
+# der Stream wieder antwortet. Aus Lua heraus laesst sich der Crash
+# nicht abfangen (passiert im nativen Worker-Thread nach Rueckkehr
+# von load_audio).
+#
+# Schutzmechanismus: bevor Lua resource.load_audio aufruft, muss von
+# diesem Sidecar ein frischer 'audio_probe:ok' eingetroffen sein.
+# Bei 'audio_probe:fail' blockiert Lua den (Re)load, sodass der
+# Worker nie eine kaputte URL sieht.
+#
+# Probe-Methode: ein GET mit Range: bytes=0-0 und stream=True. Body
+# wird nicht gelesen, Verbindung sofort geschlossen — minimaler
+# Bandbreitenverbrauch. HEAD vermeiden wir bewusst, weil Icecast in
+# der Praxis oft 405/501 darauf antwortet.
+# ============================================================
+
+# Probe-Intervall: ok-Fall 5 s, fail-Fall 3 s (schnellere Recovery).
+# Probe-Timeout: 2.5 s (lang genug fuer langsame Server, kurz genug
+# um den 1-Hz-Tick im sleep_with_time_ticks-Loop nicht zu stoeren).
+_PROBE_INTERVAL_OK   = 5.0
+_PROBE_INTERVAL_FAIL = 3.0
+_PROBE_TIMEOUT       = 2.5
+
+_audio_probe_state = {
+    "next_at":  0.0,
+    "last_url": None,
+}
+
+
+def push_audio_probe(result):
+    payload = b"root/audio_probe:" + result.encode("ascii")
+    try:
+        _ipc_sock.sendto(payload, (IB_HOST, IB_PORT))
+    except Exception as e:
+        log("Audio-Probe-IPC fehlgeschlagen: %s" % e)
+
+
+def probe_audio_url(url, verify):
+    try:
+        r = requests.get(
+            url,
+            verify=verify,
+            timeout=_PROBE_TIMEOUT,
+            stream=True,
+            headers={"Range": "bytes=0-0"},
+        )
+        try:
+            r.close()
+        except Exception:
+            pass
+        # 2xx = ok; 401/403 zaehlen wir als ok, weil der Server
+        # antwortet — load_audio bekommt dann eine eindeutige
+        # Fehlermeldung und triggert den SIGSEGV nicht (in der
+        # Praxis tritt das aber nicht auf, weil Stream-URLs in
+        # diesem Package nie auth-geschuetzt sind).
+        if r.status_code < 400 or r.status_code in (401, 403):
+            return "ok"
+        return "fail"
+    except Exception:
+        return "fail"
+
+
+def maybe_probe_audio_stream(cfg):
+    enabled = bool(cfg.get("audio_stream_enabled"))
+    url     = (cfg.get("audio_stream_url") or "").strip()
+
+    # Stream deaktiviert oder URL leer → State zuruecksetzen, damit
+    # bei (Wieder-)Aktivierung sofort eine neue Probe laeuft.
+    if not enabled or not url:
+        _audio_probe_state["next_at"]  = 0.0
+        _audio_probe_state["last_url"] = None
+        return
+
+    now = time.time()
+    # URL-Wechsel erzwingt sofortige Neu-Probe (alter Probe-Timer
+    # bezog sich auf die alte URL).
+    if url != _audio_probe_state["last_url"]:
+        _audio_probe_state["next_at"] = 0.0
+    if now < _audio_probe_state["next_at"]:
+        return
+
+    verify = not bool(cfg.get("allow_insecure_https"))
+    result = probe_audio_url(url, verify)
+    push_audio_probe(result)
+
+    _audio_probe_state["last_url"] = url
+    interval = _PROBE_INTERVAL_OK if result == "ok" else _PROBE_INTERVAL_FAIL
+    _audio_probe_state["next_at"] = now + interval
+
+
 def update_time(cfg):
     # Wenn das Overlay deaktiviert ist, schicken wir nichts — Lua
     # zeichnet es ohnehin nicht.
@@ -223,6 +325,7 @@ def sleep_with_time_ticks(total_seconds):
     while True:
         cfg = load_config()
         update_time(cfg)
+        maybe_probe_audio_stream(cfg)
         remaining = end - time.time()
         if remaining <= 0:
             return
