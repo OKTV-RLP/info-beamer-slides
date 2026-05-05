@@ -84,11 +84,38 @@ def slide_filename(name):
     return SLIDE_PREFIX + name
 
 
+# Endungen, die als Video-Container interpretiert werden. Bewusst
+# konservativ: info-beamer dokumentiert nur MP4 als unterstuetzten
+# Container fuer resource.load_video; m4v ist derselbe Container mit
+# anderem Suffix; mov teilt das ISO-BMFF-Boxen-Layout und wird vom
+# MMAL-Demuxer in der Praxis akzeptiert. webm/mkv/avi sind in der
+# info-beamer-Doku nirgendwo als unterstuetzt aufgefuehrt — Dateien
+# mit diesen Endungen werden hier daher als "image" durchgereicht und
+# wuerden in node.lua am resource.load_image scheitern (saubere
+# Fehlermeldung statt undefiniertem Verhalten beim Video-Decode).
+# Codec-Erwartung: H.264 fuer alle Pi-Versionen mit Hardware-Decoder;
+# HEVC nur Pi 4+ ab info-beamer hosted v10. Abweichende Codecs in den
+# zugelassenen Containern (z. B. HEVC-MP4 auf Pi 3) schlagen beim
+# Decode-Versuch fehl — das ist Sache des Ablieferers.
+# Identische Liste wie media_type_for in node.lua.
+VIDEO_EXTENSIONS = ("mp4", "m4v", "mov")
+
+
+def media_type(name):
+    if "." not in name:
+        return "image"
+    ext = name.rsplit(".", 1)[-1].lower()
+    if ext in VIDEO_EXTENSIONS:
+        return "video"
+    return "image"
+
+
 def write_manifest(entries):
     out = {
         "slides": [
             {"file": slide_filename(e["name"]),
-             "duration": e["duration"]}
+             "duration": e["duration"],
+             "type": media_type(e["name"])}
             for e in entries
         ],
     }
