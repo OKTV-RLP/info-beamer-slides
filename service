@@ -84,11 +84,29 @@ def slide_filename(name):
     return SLIDE_PREFIX + name
 
 
+# Endungen, die als H.264-Videofolien interpretiert werden. Identische
+# Liste wie media_type_for in node.lua — Lua erkennt es zwar auch ueber
+# die Dateiendung, aber wir setzen "type" explizit, damit der Manifest-
+# Konsument keine Endungs-Logik braucht und kuenftige Sonderformate
+# (z. B. Audio-Slides) sauber abgrenzbar bleiben.
+VIDEO_EXTENSIONS = ("mp4", "webm", "mov", "mkv", "m4v", "avi")
+
+
+def media_type(name):
+    if "." not in name:
+        return "image"
+    ext = name.rsplit(".", 1)[-1].lower()
+    if ext in VIDEO_EXTENSIONS:
+        return "video"
+    return "image"
+
+
 def write_manifest(entries):
     out = {
         "slides": [
             {"file": slide_filename(e["name"]),
-             "duration": e["duration"]}
+             "duration": e["duration"],
+             "type": media_type(e["name"])}
             for e in entries
         ],
     }

@@ -10,15 +10,33 @@
 -- Manifest-Update).
 --
 -- Backup- und Hintergrund-Slot akzeptieren je ein Bild ODER ein Video.
--- Bilder funktionieren auf jedem Pi; Video-Loops setzen Pi 4+ voraus
--- (raw=true GL-Pipeline).
+-- Folien selbst koennen Bilder (PNG) ODER H.264-Videos (MP4) sein,
+-- in beliebiger Mischung in der Playlist. Video-Folien werden in voller
+-- Dateilaenge ausgespielt (Manifest-duration wird ignoriert) und mit
+-- Hard-Cut an Image- bzw. anderen Video-Folien angeschlossen — der
+-- Crossfade-Shader kann nur GL-Texturen samplen, nicht raw-Videos.
 --
--- Audio-Routing (Audio ist load-time-only in info-beamer; pause/start
--- schaltet zwischen Quellen):
+-- Bilder funktionieren auf jedem Pi; Video-Loops/Folien setzen einen
+-- H.264-Hardware-Decoder voraus (raw=true GL-Pipeline). Auf Pi 3B
+-- gibt es nur EINEN Decoder-Slot — das BG-Video wird daher fuer die
+-- Dauer einer Video-Folie via background_yield() komplett freigegeben
+-- und mit background_resume() wieder geladen.
+--
+-- Layer-Stack (negativ = hinter GL-Surface):
+--   -3: Hintergrund-Video (background_slot)
+--   -2: Backup-Video      (backup_slot)
+--   -1: Foreground-Video  (fg_video, NEU — nur waehrend Video-Folien aktiv)
+--    0: GL-Surface mit Folien-Image, Cornerlogo, Zeit-Overlay
+-- Cornerlogo + Zeit liegen damit auch ueber laufenden Video-Folien.
+--
+-- Audio (info-beamer mischt automatisch alle :start()-aktiven Quellen):
 --   * Normalbetrieb (PLAYING): Audio des Hintergrund-Videos.
 --   * Backup-Zustand (IDLE) mit Backup-VIDEO: Audio des Backup-Videos.
 --   * Backup-Zustand mit Backup-BILD: Audio des Hintergrund-Videos
---     läuft weiter, das Backup-Bild liegt nur visuell darüber.
+--     laeuft weiter, das Backup-Bild liegt nur visuell darueber.
+--   * Video-Folie (PLAYING): FG-Audio mischt sich mit der bisherigen
+--     Quelle (Stream/Jukebox); BG-Audio entfaellt, weil BG fuer den
+--     Decoder-Slot weichen muss.
 
 gl.setup(NATIVE_WIDTH, NATIVE_HEIGHT)
 
@@ -39,8 +57,11 @@ local CONFIG = {
 -- der GL-Pipeline. layer < 0 platziert das Video HINTER der GL-Surface,
 -- sodass transparente Folien-Pixel via gl.clear(_, _, _, 0) und
 -- transparenten Folien-PNG-Bereichen das Video durchscheinen lassen.
--- Backup auf höherer (= weniger negativer) Ebene als Background, damit
--- es im IDLE-Zustand das Hintergrund-Video überdeckt.
+-- Reihenfolge der negativen Layer (siehe Datei-Header): BG (-3),
+-- Backup (-2), Foreground-Video-Folie (-1, dynamisch). Backup auf
+-- hoeherer (= weniger negativer) Ebene als BG, damit es im IDLE-
+-- Zustand das BG-Video ueberdeckt; FG-Video wiederum oberhalb von
+-- Backup, damit eine Video-Folie BG/Backup ueberblendet.
 -- slot.audio steuert, ob die Resource mit Audio-Track geladen wird.
 -- Backup-Video: immer mit Audio (Audio-Quelle nur waehrend IDLE+
 -- backup-video sichtbar; Pause durch :stop() in anderen States ist
@@ -51,8 +72,19 @@ local CONFIG = {
 --                             und wird vom Routing nicht :stop()ed)
 -- Bei Toggle des Stream-Zustands forciert update_media_slot ueber
 -- den slot.audio_loaded-Vergleich einen Reload des BG-Videos.
-local backup_slot     = { res = nil, kind = nil, file = nil, label = "Backup-Inhalt",     layer = -1, audio = true }
-local background_slot = { res = nil, kind = nil, file = nil, label = "Hintergrund-Inhalt", layer = -2, audio = true }
+local backup_slot     = { res = nil, kind = nil, file = nil, label = "Backup-Inhalt",     layer = -2, audio = true }
+local background_slot = { res = nil, kind = nil, file = nil, label = "Hintergrund-Inhalt", layer = -3, audio = true }
+
+-- Foreground-Video-Slot fuer Video-Folien. Nur eine Resource gleichzeitig
+-- (Lazy-Load beim Eintritt in eine Video-Folie, Dispose beim Verlassen).
+-- BG-Video MUSS vor dem Load via background_yield() freigegeben werden,
+-- weil Pi 3B nur einen H.264-Decoder hat. looped=false → das Video laeuft
+-- bis :state() == "finished", dann advanced der Render-Loop.
+local fg_video = {
+    res   = nil,
+    file  = nil,
+    layer = -1,
+}
 
 -- Optionales Zeit-Overlay. Wird im PLAYING-Zustand über den Folien
 -- gezeichnet, im IDLE-Zustand vom Backup-Layer überdeckt (durch
@@ -94,10 +126,11 @@ local STATE_IDLE    = "idle"      -- keine Folien aktiv → backup_slot
 local STATE_PLAYING = "playing"
 
 local state          = STATE_IDLE
-local slides         = {}     -- [{file, duration, res}, ...]
+local slides         = {}     -- [{file, kind, duration, res}, ...]
 local current_idx    = 1
 local slide_started  = 0
 local pending_slides = nil    -- nächste Liste, swap am Zyklus-Ende
+local last_cur       = nil    -- zuletzt gerenderte Folie (Slide-Wechsel-Hook)
 
 -- Zyklus-Crossfade (letzte Folie alt → erste Folie neu).
 local outgoing         = nil   -- nil oder {res, dispose_after}
@@ -711,6 +744,7 @@ local function set_outgoing(slide)
     if not slide or not slide.res then return end
     outgoing = {
         res           = slide.res,
+        kind          = slide.kind,
         dispose_after = false,   -- ggf. von swap_slides auf true geflippt
     }
     cycle_fade_start = now()
@@ -779,6 +813,78 @@ local function update_media_slot(slot, cfg_value, default_name)
         local hint = (kind == "video") and " (Video-Loop benötigt Pi 4+)" or ""
         print(slot.label .. " nicht ladbar: " .. name .. hint)
     end
+end
+
+------------------------------------------------------------
+-- Foreground-Video / BG-Yield (fuer Video-Folien)
+------------------------------------------------------------
+
+-- FG-Video aus dem Speicher loesen. Wird beim Verlassen einer Video-
+-- Folie und vor jedem Reload aufgerufen. :place(0,0,0,0) verhindert,
+-- dass info-beamer das letzte Frame auf seinem Layer eingefroren stehen
+-- laesst — sonst bliebe es bis zum naechsten Slide-Wechsel sichtbar.
+local function fg_video_unload()
+    if fg_video.res then
+        pcall(function() fg_video.res:place(0, 0, 0, 0) end)
+        pcall(function() fg_video.res:dispose() end)
+    end
+    fg_video.res, fg_video.file = nil, nil
+end
+
+-- FG-Video laden und starten. looped=false → laeuft bis "finished",
+-- dann triggert der Render-Loop das Advance. audio=true: der Audio-Track
+-- mischt sich automatisch in den info-beamer-Output, parallel zu Stream/
+-- Jukebox/BG (siehe Datei-Header). Auf Pi 3B muss vor dem Load das BG-
+-- Video via background_yield() weichen — das macht der Caller.
+local function fg_video_load(slide)
+    if fg_video.res and fg_video.file == slide.file then return end
+    fg_video_unload()
+    local ok, r = pcall(resource.load_video, {
+        file   = slide.file,
+        looped = false,
+        raw    = true,
+        audio  = true,
+        paused = true,
+    })
+    if ok and r then
+        pcall(function() r:layer(fg_video.layer) end)
+        pcall(function() r:start() end)
+        fg_video.res, fg_video.file = r, slide.file
+    else
+        print("FG-Video nicht ladbar: " .. tostring(slide.file))
+    end
+end
+
+-- Pi-3B-Engpass: nur ein H.264-Hardware-Decoder. Wenn eine Video-Folie
+-- spielen soll, muss das BG-Video vorher KOMPLETT freigegeben werden
+-- (:dispose), nicht nur :stop()'t — sonst behaelt manche info-beamer-
+-- Build den Decoder-Slot weiter belegt und der FG-Load schlaegt fehl.
+-- bg_yielded_state merkt sich Filename + Audio-Modus, damit
+-- background_resume() die Resource beim Verlassen der Video-Folie ueber
+-- update_media_slot wiederherstellen kann. Der config.json-Watch muss
+-- waehrend bg_yielded_state ~= nil das BG NICHT laden — sonst greift
+-- der Yield ins Leere; das wird im Watch-Handler abgefangen.
+local bg_yielded_state = nil  -- {file, audio}
+
+local function background_yield()
+    if not background_slot.res then return end
+    bg_yielded_state = {
+        file  = background_slot.file,
+        audio = background_slot.audio,
+    }
+    pcall(function() background_slot.res:dispose() end)
+    background_slot.res, background_slot.kind = nil, nil
+    background_slot.file, background_slot.audio_loaded = nil, nil
+    audio_active = nil   -- Routing zwingen, neu zu evaluieren
+end
+
+local function background_resume()
+    if not bg_yielded_state then return end
+    local restore = bg_yielded_state
+    bg_yielded_state = nil
+    background_slot.audio = restore.audio
+    update_media_slot(background_slot, restore.file, nil)
+    audio_active = nil
 end
 
 ------------------------------------------------------------
@@ -853,10 +959,22 @@ util.file_watch("config.json", function(raw)
         end
     end
 
-    background_slot.audio = not (audio_stream.enabled or audio_jukebox.enabled)
+    update_media_slot(backup_slot, cfg.backup_media, "empty.png")
 
-    update_media_slot(backup_slot,     cfg.backup_media,     "empty.png")
-    update_media_slot(background_slot, cfg.background_media, nil)
+    -- BG-Slot: waehrend einer Video-Folie ist das BG-Video via
+    -- background_yield() disposed (Pi 3B Decoder-Engpass). Wir fuettern
+    -- die neuen Werte in bg_yielded_state, damit background_resume()
+    -- spaeter die richtige Resource wiederherstellt — KEIN update_media_
+    -- slot, sonst kollidiert der Reload mit dem laufenden FG-Video.
+    local bg_audio_now = not (audio_stream.enabled or audio_jukebox.enabled)
+    if bg_yielded_state then
+        bg_yielded_state.audio = bg_audio_now
+        bg_yielded_state.file  = cfg.background_media
+        background_slot.audio  = bg_audio_now  -- bleibt fuer spaeter konsistent
+    else
+        background_slot.audio = bg_audio_now
+        update_media_slot(background_slot, cfg.background_media, nil)
+    end
 
     -- Zeit-Overlay (Format und Timezone liest der Python-Service;
     -- Lua-Seite verarbeitet nur den fertigen Text aus dem
@@ -921,6 +1039,13 @@ util.json_watch("manifest.json", function(m)
     -- bleiben erhalten, um beim nächsten Manifest-Update ggf. nahtlos
     -- weiterzumachen — gerendert werden sie in IDLE nicht.
     if #entries == 0 then
+        -- Falls gerade eine Video-Folie laeuft: FG-Video wegraeumen und
+        -- BG-Video reaktivieren, sonst bliebe die Decoder-Belegung
+        -- bestehen und der Backup-Pfad waere visuell vom FG ueberdeckt.
+        if fg_video.res then
+            fg_video_unload()
+            background_resume()
+        end
         dispose_list(pending_slides)
         pending_slides = nil
         end_cycle_fade()
@@ -928,19 +1053,36 @@ util.json_watch("manifest.json", function(m)
         return
     end
 
-    -- Folien laden.
+    -- Folien laden. Image-Slides werden sofort als GL-Texturen geladen
+    -- (preload), Video-Slides nur als Metadaten — die Resource entsteht
+    -- erst beim Eintritt in die Folie via fg_video_load (Lazy-Load,
+    -- weil Pi 3B nur einen Decoder hat und mehrere Videos parallel
+    -- nicht haltbar waeren).
     local loaded = {}
     for _, e in ipairs(entries) do
         if e.file then
-            local ok, res = pcall(resource.load_image, {file = e.file})
-            if ok and res then
+            local kind = media_type_for(e, e.file)
+            if kind == "video" then
+                -- duration aus Manifest wird ignoriert: Video laeuft bis
+                -- :state() == "finished".
                 loaded[#loaded + 1] = {
                     file     = e.file,
-                    duration = tonumber(e.duration) or CONFIG.default_duration,
-                    res      = res,
+                    kind     = "video",
+                    duration = 0,
+                    res      = nil,
                 }
             else
-                print("Folie nicht ladbar: " .. tostring(e.file))
+                local ok, res = pcall(resource.load_image, {file = e.file})
+                if ok and res then
+                    loaded[#loaded + 1] = {
+                        file     = e.file,
+                        kind     = "image",
+                        duration = tonumber(e.duration) or CONFIG.default_duration,
+                        res      = res,
+                    }
+                else
+                    print("Folie nicht ladbar: " .. tostring(e.file))
+                end
             end
         end
     end
@@ -1077,10 +1219,18 @@ function node.render()
     gl.clear(0, 0, 0, 0)
 
     if state == STATE_IDLE then
+        -- Defensiv: falls IDLE betreten wurde, ohne dass die ueblichen
+        -- State-Transition-Pfade FG-Cleanup gelaufen sind (z. B. bei
+        -- erstem Render-Frame nach Knoten-Start mit altem fg_video-
+        -- State waere ohnehin alles nil — der Block kostet nichts).
+        if fg_video.res then
+            fg_video_unload()
+            background_resume()
+        end
         if backup_slot.kind == "video" and backup_slot.res then
-            -- Backup-Video übernimmt voll: das Video liegt auf Layer -1
+            -- Backup-Video übernimmt voll: das Video liegt auf Layer -2
             -- hinter der (transparenten) GL-Surface und überdeckt das
-            -- Hintergrund-Video auf Layer -2. Wir zeichnen weder
+            -- Hintergrund-Video auf Layer -3. Wir zeichnen weder
             -- Hintergrund-Bild noch sonst etwas auf GL, damit das
             -- Backup-Video sichtbar bleibt.
             pcall(function() backup_slot.res:place(0, 0, WIDTH, HEIGHT) end)
@@ -1095,48 +1245,79 @@ function node.render()
         end
         -- Cornerlogo IMMER ganz oben (auch im Backup-Zustand).
         draw_corner_logo()
+        last_cur = nil
         return
     end
 
     -- PLAYING
     if #slides == 0 then
+        if fg_video.res then
+            fg_video_unload()
+            background_resume()
+        end
+        last_cur = nil
         state = STATE_IDLE
         return
     end
 
     local cur = slides[current_idx]
-    if not cur or not cur.res then
+    -- Image-Slides muessen eine geladene Resource haben (sonst Loader-
+    -- Fehler und sie waeren nicht in slides[] gelandet). Video-Slides
+    -- haben legitimerweise res=nil — die Resource entsteht erst durch
+    -- fg_video_load weiter unten.
+    if not cur then
+        if fg_video.res then
+            fg_video_unload()
+            background_resume()
+        end
+        last_cur = nil
         state = STATE_IDLE
         return
     end
 
-    -- Hintergrund: Video :place auf Layer -2 (durchscheinend hinter
+    -- Hintergrund: Video :place auf Layer -3 (durchscheinend hinter
     -- transparenten Folien-Pixeln), Bild direkt auf GL (von Folien
     -- überdeckt, scheint durch transparente Folien-Pixel hindurch).
+    -- Waehrend einer Video-Folie ist background_slot via
+    -- background_yield() disposed — draw_slot wird dann zum No-op.
     draw_slot(background_slot, 1)
 
     -- Backup-Video off-screen verstecken — sonst würde sein Standbild
-    -- auf Layer -1 das Hintergrund-Video durch die transparenten
+    -- auf Layer -2 das Hintergrund-Video durch die transparenten
     -- Folien-Pixel hindurch überdecken.
     hide_video(backup_slot)
 
     local fade_dur = math.max(0, CONFIG.fade_duration)
+    local elapsed  = t - slide_started
 
-    -- Eine Folie muss mindestens fade_dur lang "current" sein, sonst
-    -- bleibt fuer den Crossfade auf die naechste Folie keine Zeit. Bei
-    -- duration=0 (oder duration < fade_dur) wuerde der Advance sofort
-    -- nach dem Eintritt ausloesen und den Out-Fade ueberspringen — die
-    -- naechste Folie poppt dann hart rein. Mit max(duration, fade_dur)
-    -- spielt der Crossfade immer komplett.
-    local cur_dur = math.max(cur.duration, fade_dur)
-    local elapsed = t - slide_started
+    -- Advance-Entscheidung. Bei Image-Slides timer-basiert (mind.
+    -- fade_dur lang sichtbar, sonst kein vollstaendiger Out-Fade), bei
+    -- Video-Slides am Decoder-State festgemacht: das Video laeuft bis
+    -- "finished", dann wechseln wir. Manifest-duration wird fuer Videos
+    -- ignoriert. "error" behandeln wir wie "finished" — eine kaputte
+    -- Folie soll nicht den Zyklus blockieren.
+    local should_advance
+    if cur.kind == "video" then
+        if fg_video.res then
+            local ok, st = pcall(function() return fg_video.res:state() end)
+            should_advance = ok and (st == "finished" or st == "error")
+        else
+            -- Load fehlgeschlagen oder noch nicht erfolgt; ueberspringen,
+            -- aber nur wenn der Slide-Wechsel-Hook bereits gelaufen ist
+            -- (sonst skippen wir die Folie noch vor dem Lade-Versuch).
+            should_advance = (cur == last_cur)
+        end
+    else
+        local cur_dur = math.max(cur.duration, fade_dur)
+        should_advance = (elapsed >= cur_dur)
+    end
 
     -- Advance ZUERST. Beim Zyklus-Ende setzt das outgoing — der
     -- Cycle-Fade-Check muss DANACH laufen, damit die Crossfade direkt
     -- im selben Frame anlaeuft. Sonst entstuende ein Single-Frame-
     -- Flackern, in dem die naechste Folie kurz allein sichtbar ist,
     -- bevor das Cycle-Crossfade im Folgeframe startet.
-    if elapsed >= cur_dur then
+    if should_advance then
         if current_idx >= #slides then
             -- Zyklus-Ende: outgoing erfassen, ggf. pending einsetzen.
             set_outgoing(cur)
@@ -1150,43 +1331,69 @@ function node.render()
         end
         slide_started = t
         cur           = slides[current_idx]
-        cur_dur       = math.max(cur.duration, fade_dur)
         elapsed       = 0
     end
 
-    -- Zyklus-Crossfade: outgoing (letzte Folie alt) ausblenden, cur
-    -- (erste Folie neu) einblenden. Greift sowohl bei laufendem Fade
-    -- aus vorigen Frames als auch im Frame, in dem advance gerade
-    -- outgoing gesetzt hat (cycle_elapsed = 0 → progress = 0 →
-    -- outgoing voll sichtbar, cur unsichtbar — keine harte Folge).
-    local slide_drawn = false
-    if outgoing then
-        local cycle_elapsed = t - cycle_fade_start
-        if fade_dur > 0 and cycle_elapsed < fade_dur then
-            local progress = cycle_elapsed / fade_dur
-            draw_crossfade(outgoing.res, cur.res, progress)
-            slide_drawn = true
-        else
-            end_cycle_fade()
+    -- Slide-Wechsel-Hook: Video-Folien benoetigen explizite Decoder-
+    -- Koordination (BG yield/resume) und Lazy-Load. Wird auch beim
+    -- ersten Frame nach IDLE→PLAYING aktiv (last_cur ist dann nil bzw.
+    -- zeigt auf eine alte Folie).
+    if cur ~= last_cur then
+        if cur.kind == "video" then
+            background_yield()
+            fg_video_load(cur)
+        elseif last_cur and last_cur.kind == "video" then
+            fg_video_unload()
+            background_resume()
         end
+        last_cur = cur
     end
 
-    if not slide_drawn then
-        -- Intra-Zyklus-Crossfade oder einfache Folie.
-        local fade_at = cur_dur - fade_dur
-        if fade_dur > 0 and elapsed >= fade_at and current_idx < #slides then
-            local nxt      = slides[current_idx + 1]
-            local progress = math.min(1, (elapsed - fade_at) / fade_dur)
-            draw_crossfade(cur.res, nxt.res, progress)
-        else
-            draw_fit(cur.res, 1)
+    if cur.kind == "video" then
+        -- Hard-Cut zur Video-Folie: laufenden Cycle-Fade verwerfen,
+        -- GL-Surface bleibt transparent (Folie wird NICHT gezeichnet),
+        -- damit das FG-Video auf Layer -1 voll sichtbar ist.
+        end_cycle_fade()
+        if fg_video.res then
+            pcall(function() fg_video.res:place(0, 0, WIDTH, HEIGHT) end)
+        end
+    else
+        -- Image-Pfad. Crossfade nur Image↔Image — Outgoing oder Nachfolger
+        -- als Video → Hard-Cut (kein Shader-Sample auf raw-Videos
+        -- moeglich).
+        local slide_drawn = false
+        if outgoing then
+            local cycle_elapsed = t - cycle_fade_start
+            local can_fade = (outgoing.kind == "image")
+            if can_fade and fade_dur > 0 and cycle_elapsed < fade_dur then
+                local progress = cycle_elapsed / fade_dur
+                draw_crossfade(outgoing.res, cur.res, progress)
+                slide_drawn = true
+            else
+                end_cycle_fade()
+            end
+        end
+
+        if not slide_drawn then
+            local cur_dur = math.max(cur.duration, fade_dur)
+            local fade_at = cur_dur - fade_dur
+            local nxt     = slides[current_idx + 1]
+            if nxt and nxt.kind == "image"
+               and fade_dur > 0 and elapsed >= fade_at
+               and current_idx < #slides then
+                local progress = math.min(1, (elapsed - fade_at) / fade_dur)
+                draw_crossfade(cur.res, nxt.res, progress)
+            else
+                draw_fit(cur.res, 1)
+            end
         end
     end
 
     -- Zeit-Overlay über den Folien (in IDLE wird es ohnehin nicht
     -- aufgerufen, da das frühe return im IDLE-Branch bereits gezogen
     -- hat — somit bleibt die "hinter dem Backup-Layer"-Semantik
-    -- erhalten).
+    -- erhalten). Liegt auf der GL-Surface (Layer 0) und ist somit auch
+    -- ueber FG-Video-Folien (Layer -1) sichtbar.
     draw_time_overlay()
 
     -- Cornerlogo IMMER ganz oben.
