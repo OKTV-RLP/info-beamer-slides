@@ -836,8 +836,14 @@ end
 -- mischt sich automatisch in den info-beamer-Output, parallel zu Stream/
 -- Jukebox/BG (siehe Datei-Header). Auf Pi 3B muss vor dem Load das BG-
 -- Video via background_yield() weichen — das macht der Caller.
+--
+-- Rueckgabe: true bei erfolgreichem Load, false sonst (Caller kann dann
+-- z. B. background_resume() aufrufen, statt das BG dauerhaft yielded
+-- zu lassen). Kein Same-File-Shortcut: wenn der Hook erneut feuert
+-- (= Slide-Wechsel auf direkt aufeinanderfolgenden gleichen Video-
+-- Dateinamen), wollen wir die Wiedergabe zurueckspulen, nicht beim
+-- "finished"-State haengen bleiben.
 local function fg_video_load(slide)
-    if fg_video.res and fg_video.file == slide.file then return end
     fg_video_unload()
     local ok, r = pcall(resource.load_video, {
         file   = slide.file,
@@ -850,9 +856,10 @@ local function fg_video_load(slide)
         pcall(function() r:layer(fg_video.layer) end)
         pcall(function() r:start() end)
         fg_video.res, fg_video.file = r, slide.file
-    else
-        print("FG-Video nicht ladbar: " .. tostring(slide.file))
+        return true
     end
+    print("FG-Video nicht ladbar: " .. tostring(slide.file))
+    return false
 end
 
 -- Pi-3B-Engpass: nur ein H.264-Hardware-Decoder. Wenn eine Video-Folie
@@ -866,8 +873,15 @@ end
 -- der Yield ins Leere; das wird im Watch-Handler abgefangen.
 local bg_yielded_state = nil  -- {file, audio}
 
+-- Yield NUR bei Video-BG: Image-BG belegt keinen Hardware-Decoder, ein
+-- Dispose+Reload waere reine Verschwendung. Stattdessen wird ein Image-
+-- BG einfach waehrend der Video-Folie nicht gezeichnet (s. Render-Loop:
+-- show_video-Gate) — sonst wuerde es auf Layer 0 das FG-Video auf
+-- Layer -1 verdecken.
 local function background_yield()
-    if not background_slot.res then return end
+    if background_slot.kind ~= "video" or not background_slot.res then
+        return
+    end
     bg_yielded_state = {
         file  = background_slot.file,
         audio = background_slot.audio,
@@ -885,6 +899,18 @@ local function background_resume()
     background_slot.audio = restore.audio
     update_media_slot(background_slot, restore.file, nil)
     audio_active = nil
+end
+
+-- Cleanup-Helper fuer alle Pfade, die eine evtl. laufende Video-Folie
+-- verlassen (IDLE-Uebergang, leere Playlist, ungueltige cur). Geht
+-- bewusst auf BEIDE Indikatoren (fg_video.res ODER bg_yielded_state) —
+-- bei einem fehlgeschlagenen fg_video_load ist fg_video.res = nil, aber
+-- bg_yielded_state noch gesetzt; ohne den expliziten Check bliebe das
+-- BG dauerhaft yielded (config-Watch laedt es absichtlich nicht nach).
+local function leave_video_slide_if_active()
+    if not (fg_video.res or bg_yielded_state) then return end
+    fg_video_unload()
+    background_resume()
 end
 
 ------------------------------------------------------------
@@ -1042,10 +1068,7 @@ util.json_watch("manifest.json", function(m)
         -- Falls gerade eine Video-Folie laeuft: FG-Video wegraeumen und
         -- BG-Video reaktivieren, sonst bliebe die Decoder-Belegung
         -- bestehen und der Backup-Pfad waere visuell vom FG ueberdeckt.
-        if fg_video.res then
-            fg_video_unload()
-            background_resume()
-        end
+        leave_video_slide_if_active()
         dispose_list(pending_slides)
         pending_slides = nil
         end_cycle_fade()
@@ -1220,13 +1243,10 @@ function node.render()
 
     if state == STATE_IDLE then
         -- Defensiv: falls IDLE betreten wurde, ohne dass die ueblichen
-        -- State-Transition-Pfade FG-Cleanup gelaufen sind (z. B. bei
-        -- erstem Render-Frame nach Knoten-Start mit altem fg_video-
-        -- State waere ohnehin alles nil — der Block kostet nichts).
-        if fg_video.res then
-            fg_video_unload()
-            background_resume()
-        end
+        -- State-Transition-Pfade FG-Cleanup gelaufen sind. Greift auch
+        -- bei haengendem bg_yielded_state (z. B. nach fehlgeschlagenem
+        -- fg_video_load), wo fg_video.res selbst nil ist.
+        leave_video_slide_if_active()
         if backup_slot.kind == "video" and backup_slot.res then
             -- Backup-Video übernimmt voll: das Video liegt auf Layer -2
             -- hinter der (transparenten) GL-Surface und überdeckt das
@@ -1251,10 +1271,7 @@ function node.render()
 
     -- PLAYING
     if #slides == 0 then
-        if fg_video.res then
-            fg_video_unload()
-            background_resume()
-        end
+        leave_video_slide_if_active()
         last_cur = nil
         state = STATE_IDLE
         return
@@ -1266,26 +1283,23 @@ function node.render()
     -- haben legitimerweise res=nil — die Resource entsteht erst durch
     -- fg_video_load weiter unten.
     if not cur then
-        if fg_video.res then
-            fg_video_unload()
-            background_resume()
-        end
+        leave_video_slide_if_active()
         last_cur = nil
         state = STATE_IDLE
         return
     end
 
-    -- Hintergrund: Video :place auf Layer -3 (durchscheinend hinter
-    -- transparenten Folien-Pixeln), Bild direkt auf GL (von Folien
-    -- überdeckt, scheint durch transparente Folien-Pixel hindurch).
-    -- Waehrend einer Video-Folie ist background_slot via
-    -- background_yield() disposed — draw_slot wird dann zum No-op.
-    draw_slot(background_slot, 1)
-
     -- Backup-Video off-screen verstecken — sonst würde sein Standbild
     -- auf Layer -2 das Hintergrund-Video durch die transparenten
     -- Folien-Pixel hindurch überdecken.
     hide_video(backup_slot)
+
+    -- Hintergrund-Draw wird unten gemeinsam mit der Slide-Wahl gemacht:
+    -- bei aktiver Video-Folie zeichnen wir das BG NICHT auf die GL-
+    -- Surface (Image-BG auf Layer 0 wuerde das FG-Video auf Layer -1
+    -- ueberdecken), bei Image-Folien oder Video-Folien-Lade-Fehler aber
+    -- schon. Bei Video-BG ist background_slot via background_yield()
+    -- ohnehin disposed, dann ist der Aufruf eh ein No-op.
 
     local fade_dur = math.max(0, CONFIG.fade_duration)
     local elapsed  = t - slide_started
@@ -1337,11 +1351,15 @@ function node.render()
     -- Slide-Wechsel-Hook: Video-Folien benoetigen explizite Decoder-
     -- Koordination (BG yield/resume) und Lazy-Load. Wird auch beim
     -- ersten Frame nach IDLE→PLAYING aktiv (last_cur ist dann nil bzw.
-    -- zeigt auf eine alte Folie).
+    -- zeigt auf eine alte Folie). Bei Video-Lade-Fehler sofort BG
+    -- zurueckholen — sonst bliebe der Decoder unnoetig freigegeben und
+    -- der Frame haette weder FG-Video noch Hintergrund.
     if cur ~= last_cur then
         if cur.kind == "video" then
             background_yield()
-            fg_video_load(cur)
+            if not fg_video_load(cur) then
+                background_resume()
+            end
         elseif last_cur and last_cur.kind == "video" then
             fg_video_unload()
             background_resume()
@@ -1349,10 +1367,21 @@ function node.render()
         last_cur = cur
     end
 
+    -- show_video=true: FG-Video erfolgreich geladen und sichtbar — BG
+    -- nicht zeichnen (FG deckt den Schirm). show_video=false: Image-
+    -- Slide ODER Video-Slide mit Lade-Fehler — BG als sichtbarer
+    -- Untergrund zeichnen.
+    local show_video = (cur.kind == "video") and fg_video.res ~= nil
+    if not show_video then
+        draw_slot(background_slot, 1)
+    end
+
     if cur.kind == "video" then
         -- Hard-Cut zur Video-Folie: laufenden Cycle-Fade verwerfen,
         -- GL-Surface bleibt transparent (Folie wird NICHT gezeichnet),
-        -- damit das FG-Video auf Layer -1 voll sichtbar ist.
+        -- damit das FG-Video auf Layer -1 voll sichtbar ist. Bei Lade-
+        -- Fehler bleibt zumindest das BG sichtbar, bis im naechsten
+        -- Frame der should_advance-Pfad weiterspringt.
         end_cycle_fade()
         if fg_video.res then
             pcall(function() fg_video.res:place(0, 0, WIDTH, HEIGHT) end)
