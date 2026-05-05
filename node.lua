@@ -289,6 +289,21 @@ local function db_to_linear(db)
     return 10 ^ (db / 20)
 end
 
+-- URL-Sanitizer: percent-kodiert alle Bytes >= 0x80 (Non-ASCII).
+-- Hintergrund: wenn die im Setup hinterlegte Stream-URL roh-UTF-8
+-- enthaelt (z. B. "ß" als 0xC3 0x9F), liefert der HTTP-Server fuer
+-- den so kodierten Pfad meist 404 — und ein bekannter SIGSEGV im
+-- info-beamer-Audio-Worker beim Verarbeiten dieses 404 reisst den
+-- gesamten Node samt Watchdog im Sekundentakt mit. Idempotent: bereits
+-- prozentkodierte URLs (rein ASCII) bleiben unveraendert, doppelte
+-- Kodierung kann also nicht auftreten.
+local function sanitize_url(url)
+    if type(url) ~= "string" or url == "" then return url end
+    return (url:gsub("[\128-\255]", function(c)
+        return string.format("%%%02X", string.byte(c))
+    end))
+end
+
 -- Englische Wochentag-/Monatsnamen durch deutsche ersetzen. Wird auf
 -- die Ausgabe von os.date() angewendet, weil info-beamer-Lua mit
 -- C-Locale läuft (=> englische %A/%B/%a/%b). Frontier-Patterns
@@ -467,12 +482,16 @@ end
 -- damit update_audio_routing im nächsten Frame über :volume(0/1)
 -- entscheidet. last_attempt setzt die Cooldown-Schranke für den
 -- Watchdog, damit fehlerhafte Streams nicht in einer Reconnect-
--- Schleife landen.
+-- Schleife landen. Vor dem Load wird die URL via sanitize_url percent-
+-- kodiert (s. dort) — der Vergleich loaded_url ↔ audio_stream.url
+-- bleibt absichtlich gegen die Roh-Form, damit Setup-Aenderungen
+-- erkannt werden.
 local function load_audio_stream()
     audio_stream.last_attempt = sys.now()
 
+    local request_url = sanitize_url(audio_stream.url)
     local ok, r = pcall(resource.load_audio, {
-        file   = audio_stream.url,
+        file   = request_url,
         buffer = audio_stream.buffer,
         paused = true,
     })
@@ -482,13 +501,17 @@ local function load_audio_stream()
         pcall(function() r:volume(0) end)  -- gemutet starten
         pcall(function() r:start() end)     -- Decoder anwerfen
         audio_active = nil                  -- Routing-Neuevaluation
-        print("Audio-Stream geladen: " .. audio_stream.url)
+        if request_url ~= audio_stream.url then
+            print("Audio-Stream geladen (URL prozentkodiert): " .. request_url)
+        else
+            print("Audio-Stream geladen: " .. request_url)
+        end
     else
         audio_stream.res = nil
         audio_stream.loaded_url = nil
         print(string.format(
             "Audio-Stream nicht ladbar: %s (Fehler: %s)",
-            audio_stream.url, tostring(r)
+            request_url, tostring(r)
         ))
     end
 end
@@ -1164,10 +1187,23 @@ end
 -- kein :size). Beide Pfade strecken ohne Aspect-Korrektur — Backup-
 -- und Hintergrund-Assets daher in nativer Display-Auflösung
 -- (z. B. 1920x1080) anliefern, sonst verzerrt es.
+-- :place() wirkt nur in den States 'paused', 'loaded', 'playing',
+-- 'finished'. Im 'loading'-State (Decoder waermt sich noch auf, Frame-
+-- Groesse unbekannt) loggt info-beamer eine Warnung mit Stacktrace und
+-- ignoriert den Aufruf. Im 'error'-State ist :place() ohnehin sinnlos.
+-- Beide Faelle hier hart filtern, damit der Render-Pfad sauber bleibt.
+local function video_placeable(res)
+    if not res then return false end
+    local ok, st = pcall(function() return res:state() end)
+    return ok and st ~= "loading" and st ~= "error"
+end
+
 local function draw_slot(slot, alpha)
     if not slot.res then return end
     if slot.kind == "video" then
-        pcall(function() slot.res:place(0, 0, WIDTH, HEIGHT) end)
+        if video_placeable(slot.res) then
+            pcall(function() slot.res:place(0, 0, WIDTH, HEIGHT) end)
+        end
     else
         slot.res:draw(0, 0, WIDTH, HEIGHT, alpha or 1)
     end
@@ -1175,8 +1211,10 @@ end
 
 -- Verstecke ein Video durch :place auf ein 0×0-Rechteck — info-beamer
 -- behält sonst die letzte Platzierung bei und das Video bliebe sichtbar.
+-- Auch hier nur ausfuehren, wenn das Video place'bar ist; im 'loading'-
+-- State gibt es ohnehin nichts Sichtbares zu verstecken.
 local function hide_video(slot)
-    if slot.kind == "video" and slot.res then
+    if slot.kind == "video" and video_placeable(slot.res) then
         pcall(function() slot.res:place(0, 0, 0, 0) end)
     end
 end
@@ -1270,7 +1308,9 @@ function node.render()
             -- Hintergrund-Video auf Layer -3. Wir zeichnen weder
             -- Hintergrund-Bild noch sonst etwas auf GL, damit das
             -- Backup-Video sichtbar bleibt.
-            pcall(function() backup_slot.res:place(0, 0, WIDTH, HEIGHT) end)
+            if video_placeable(backup_slot.res) then
+                pcall(function() backup_slot.res:place(0, 0, WIDTH, HEIGHT) end)
+            end
         else
             -- Backup-Bild (oder leerer Slot): Hintergrund zuerst,
             -- danach Backup-Bild darüber. Bei transparenten Pixeln
@@ -1400,7 +1440,7 @@ function node.render()
         -- Fehler bleibt zumindest das BG sichtbar, bis im naechsten
         -- Frame der should_advance-Pfad weiterspringt.
         end_cycle_fade()
-        if fg_video.res then
+        if video_placeable(fg_video.res) then
             pcall(function() fg_video.res:place(0, 0, WIDTH, HEIGHT) end)
         end
     else
