@@ -1,7 +1,7 @@
 {
     "name": "Infotext Slides",
     "author": "OKTV-RLP",
-    "desc": "M3U8-Playlist mit Bild-/Video-Folien via HTTP(S). Crossfade, Backup-Media, Hintergrund-Loop, Audio-Stream/Jukebox.",
+    "desc": "M3U/M3U8-Playlist mit Bild-/Video-Folien via HTTP(S). Crossfade, Backup-Media, Hintergrund-Loop, Audio-Stream/Jukebox.",
     "repository": "https://github.com/OKTV-RLP/info-beamer-slides",
     "platforms": [
         "pi/v7",

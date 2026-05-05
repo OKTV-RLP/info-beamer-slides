@@ -60,7 +60,10 @@ def load_config():
         return {}
 
 
-def parse_m3u8(text, default_dur):
+def parse_playlist(text, default_dur):
+    # M3U und M3U8 sind syntaktisch identisch — der Unterschied liegt
+    # nur im erwarteten Encoding (M3U: oft Latin-1/Win-1252; M3U8:
+    # UTF-8). Encoding-Behandlung passiert im Caller via r.encoding.
     entries = []
     duration = default_dur
     for line in text.splitlines():
@@ -262,17 +265,25 @@ def main():
             if not base_url.endswith("/"):
                 base_url += "/"
 
-            # Playlist holen.
+            # Playlist holen. Wenn der Server keinen Charset-Header
+            # mitliefert, raet requests fuer text/*-Content-Types
+            # standardmaessig ISO-8859-1 — das macht UTF-8-Umlaute in
+            # Dateinamen kaputt. apparent_encoding nutzt chardet zur
+            # Erkennung anhand der Bytes; deckt M3U (Latin-1) und M3U8
+            # (UTF-8) gleichermassen ab. Nur ueberschreiben, wenn der
+            # Server explizit kein charset gesetzt hat.
             try:
                 r = requests.get(playlist_url, verify=verify, timeout=10)
                 r.raise_for_status()
+                if r.encoding is None or "charset" not in r.headers.get("Content-Type", "").lower():
+                    r.encoding = r.apparent_encoding or "utf-8"
                 playlist_text = r.text
             except Exception as e:
                 log("Playlist-Fetch fehlgeschlagen: %s" % e)
                 sleep_with_time_ticks(retry_interval)
                 continue
 
-            entries = parse_m3u8(playlist_text, default_dur)
+            entries = parse_playlist(playlist_text, default_dur)
 
             if not entries:
                 if last_manifest_hash != "EMPTY":
