@@ -171,14 +171,16 @@ local audio_stream = {
 -- Solange ok ~= true (Probe-Resultat fail oder noch keine Probe
 -- empfangen), unterdrueckt check_audio_stream_health jeden
 -- (Re)load-Versuch. Hintergrund: ein bekannter SIGSEGV im info-
--- beamer-Audio-Worker beim Verarbeiten unereichbarer URLs (404,
+-- beamer-Audio-Worker beim Verarbeiten unerreichbarer URLs (404,
 -- DNS-Fail, Conn-Refused, Timeout) reisst ohne diesen Schutz den
 -- gesamten Knoten samt Watchdog im Sekundentakt mit. Aus Lua
 -- nicht abfangbar (Crash im nativen Worker-Thread).
 --
--- stale_after: laeuft die Probe aus (Sidecar tot/haengt), faellt
--- ok auf nil zurueck und der Reload-Gate blockt — sicherer
--- Default. Lieber stumm als Crash-Loop.
+-- stale_after: laeuft die Probe aus (Sidecar tot/haengt), bleibt
+-- ok zwar auf seinem letzten Wert stehen, aber der Reload-Gate
+-- prueft zusaetzlich auf Frische via (now - last_msg_at) und
+-- blockt bei stale Probe — sicherer Default. Lieber stumm als
+-- Crash-Loop.
 local audio_probe = {
     ok           = nil,
     last_msg_at  = -math.huge,

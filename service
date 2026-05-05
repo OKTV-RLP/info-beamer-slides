@@ -189,7 +189,7 @@ def push_time(text):
 # einer URL aufgerufen wird, die der Server nicht oder nicht mehr
 # bedient (404, DNS-Fail, Conn-Refused, Timeout, ...). Der Crash
 # nimmt den ganzen info-beamer-Prozess mit; Watchdog startet neu;
-# falls die URL weiter unereichbar bleibt, entsteht eine Restart-
+# falls die URL weiter unerreichbar bleibt, entsteht eine Restart-
 # Schleife im Sekundentakt — Bildschirm wird permanent schwarz, bis
 # der Stream wieder antwortet. Aus Lua heraus laesst sich der Crash
 # nicht abfangen (passiert im nativen Worker-Thread nach Rueckkehr
@@ -227,10 +227,35 @@ def push_audio_probe(result):
         log("Audio-Probe-IPC fehlgeschlagen: %s" % e)
 
 
+def sanitize_url(url):
+    """Percent-kodiert UTF-8-Bytes >= 0x80. Identisches Verhalten wie
+    sanitize_url in node.lua: Probe und resource.load_audio sehen so
+    dieselbe URL — sonst koennten beide Pfade fuer nicht-ASCII URLs
+    auseinanderlaufen (Probe meldet fail wegen 404 auf unkodiertem
+    Pfad, obwohl load_audio mit kodierter URL funktionieren wuerde,
+    der Stream waere dauerhaft geblockt). Idempotent: bereits
+    prozentkodierte URLs bleiben unveraendert."""
+    if not url:
+        return url
+    if isinstance(url, bytes):
+        data = url
+    else:
+        data = url.encode("utf-8")
+    out = []
+    for b in data:
+        # Py2: bytes-Iteration liefert str(len=1); Py3: liefert int.
+        n = b if isinstance(b, int) else ord(b)
+        if n >= 0x80:
+            out.append("%%%02X" % n)
+        else:
+            out.append(chr(n))
+    return "".join(out)
+
+
 def probe_audio_url(url, verify):
     try:
         r = requests.get(
-            url,
+            sanitize_url(url),
             verify=verify,
             timeout=_PROBE_TIMEOUT,
             stream=True,
@@ -240,12 +265,11 @@ def probe_audio_url(url, verify):
             r.close()
         except Exception:
             pass
-        # 2xx = ok; 401/403 zaehlen wir als ok, weil der Server
-        # antwortet — load_audio bekommt dann eine eindeutige
-        # Fehlermeldung und triggert den SIGSEGV nicht (in der
-        # Praxis tritt das aber nicht auf, weil Stream-URLs in
-        # diesem Package nie auth-geschuetzt sind).
-        if r.status_code < 400 or r.status_code in (401, 403):
+        # Konservativ: nur Status <400 als ok werten. Auth-Fehler
+        # (401/403) und 4xx/5xx sind aus Sicht von load_audio
+        # ebenfalls fehlgeschlagene Opens und koennen den SIGSEGV
+        # triggern — daher als fail markieren.
+        if r.status_code < 400:
             return "ok"
         return "fail"
     except Exception:
