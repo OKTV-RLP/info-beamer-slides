@@ -16,11 +16,19 @@
 -- Hard-Cut an Image- bzw. anderen Video-Folien angeschlossen — der
 -- Crossfade-Shader kann nur GL-Texturen samplen, nicht raw-Videos.
 --
--- Bilder funktionieren auf jedem Pi; Video-Loops/Folien setzen einen
--- H.264-Hardware-Decoder voraus (raw=true GL-Pipeline). Auf Pi 3B
--- gibt es nur EINEN Decoder-Slot — das BG-Video wird daher fuer die
--- Dauer einer Video-Folie via background_yield() komplett freigegeben
--- und mit background_resume() wieder geladen.
+-- Bilder funktionieren auf jedem von info-beamer hosted unterstuetzten
+-- Pi (JPEG/PNG, max. 2048x2048 wegen GL-Texture-Limit). Video-Wiedergabe
+-- laeuft via raw=true GL-Pipeline:
+--   * Pi 3 / 3B / 3B+ / Zero 2 W / Pi 4 / CM4: H.264 hardware-beschleunigt
+--   * Pi 4+ zusaetzlich HEVC hardware-beschleunigt (info-beamer hosted v10+)
+--   * Pi 5: H.264 in Software (kein HW-Decoder mehr in der VPU);
+--     funktioniert, kostet aber spuerbar mehr CPU. HEVC bleibt HW.
+-- Pi 3 / 3B / Zero 2 W haben nur EINEN H.264-Hardware-Decoder-Slot. BG-
+-- und FG-Video koennen nicht gleichzeitig HW-decodiert laufen — das
+-- BG-Video wird daher fuer die Dauer einer Video-Folie via
+-- background_yield() komplett freigegeben und mit background_resume()
+-- wieder geladen. Auf Pi 4/5 ist diese Yield-Strategie konservativ
+-- aber unschaedlich.
 --
 -- Layer-Stack (negativ = hinter GL-Surface):
 --   -3: Hintergrund-Video (background_slot)
@@ -243,8 +251,11 @@ end
 -- audio=false, weil sein Frame-Strom durchgehend visuell laufen muss
 -- und info-beamers :stop() Audio nicht ohne Video muten kann. paused
 -- =true, weil update_media_slot direkt nach load :start() aufruft
--- (so beginnt der Decoder unter unserer Kontrolle). Auf Pi 3
--- schlägt raw-Video fehl, der pcall-Aufruf liefert ok=false.
+-- (so beginnt der Decoder unter unserer Kontrolle). Der pcall faengt
+-- generische Lade-Fehler ab (Codec/Container nicht verarbeitbar,
+-- Datei kaputt, Decoder-Slot anderweitig belegt) — auf Pi 5 wird
+-- H.264 in Software dekodiert (kein HW-Decoder mehr in der VPU),
+-- funktioniert aber, nur mit hoeherer CPU-Last.
 local function load_media(name, kind, with_audio)
     if kind == "video" then
         return pcall(resource.load_video, {
@@ -816,7 +827,7 @@ local function update_media_slot(slot, cfg_value, default_name)
             pcall(function() r:start() end)
         end
     else
-        local hint = (kind == "video") and " (Video-Loop benötigt Pi 4+)" or ""
+        local hint = (kind == "video") and " (Codec/Container moeglicherweise nicht unterstuetzt)" or ""
         print(slot.label .. " nicht ladbar: " .. name .. hint)
     end
 end

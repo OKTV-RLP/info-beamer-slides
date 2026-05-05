@@ -1,10 +1,9 @@
 {
     "name": "Infotext Slides",
     "author": "OKTV-RLP",
-    "desc": "Spielt eine M3U8-Playlist mit Bildsequenzen via HTTP(S). Unterstützt Crossfade, Transparenz, Backup-Media und Hintergrund-Loop inkl. Audio.",
+    "desc": "Spielt eine M3U8-Playlist mit Bild- und Video-Folien (PNG/JPEG, MP4 H.264) via HTTP(S). Unterstützt Crossfade zwischen Bildern, Transparenz, Backup-Media, Hintergrund-Loop, optionalen Audio-Stream/Jukebox sowie ein Zeit- und Logo-Overlay. Empfohlen ab Raspberry Pi 3B.",
     "repository": "https://github.com/OKTV-RLP/info-beamer-slides",
     "platforms": [
-        "pi/v6",
         "pi/v7",
         "pi/v8"
     ],
