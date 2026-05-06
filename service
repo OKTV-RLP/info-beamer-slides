@@ -60,6 +60,38 @@ def load_config():
         return {}
 
 
+# urllib3 InsecureRequestWarning ist Process-global "klebrig" — einmal
+# disabled bleibt sie disabled. Wir tracken hier zusaetzlich den
+# logischen Status, damit auf jedem off→on-Wechsel ein einmaliges
+# WARNUNG-Log erscheint. Modul-globaler State, weil get_https_verify
+# sowohl aus main() als auch aus dem 1-Hz-Probe-Tick aufgerufen wird;
+# beide Stellen muessen sich auf denselben Status einigen.
+_insecure_warning_active = False
+
+
+def get_https_verify(cfg):
+    """Liefert das verify-Argument fuer requests-Aufrufe und
+    synchronisiert den urllib3-Warning-Status mit allow_insecure_https.
+
+    Wird aus main()- und Probe-Loop aufgerufen, damit ein Toggle
+    waehrend eines langen sleep_with_time_ticks(poll_interval) keine
+    Warning-Floods erzeugt (Probe-Requests mit verify=False ohne
+    Disable wuerden sonst InsecureRequestWarning fuer jeden Probe-
+    Tick emittieren, bis main() das naechste Mal durchlaeuft)."""
+    global _insecure_warning_active
+    verify = not bool(cfg.get("allow_insecure_https"))
+    if not verify and not _insecure_warning_active:
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        requests.packages.urllib3.disable_warnings(
+            requests.packages.urllib3.exceptions.InsecureRequestWarning
+        )
+        log("WARNUNG: TLS-Pruefung abgeschaltet (allow_insecure_https=true).")
+        _insecure_warning_active = True
+    elif verify:
+        _insecure_warning_active = False
+    return verify
+
+
 def parse_playlist(text, default_dur):
     # M3U und M3U8 sind syntaktisch identisch — der Unterschied liegt
     # nur im erwarteten Encoding (M3U: oft Latin-1/Win-1252; M3U8:
@@ -178,6 +210,155 @@ def push_time(text):
         log("Zeit-IPC fehlgeschlagen: %s" % e)
 
 
+# ============================================================
+# Audio-Stream-Probe: prueft per HTTP, ob die im Setup
+# konfigurierte Stream-URL gerade erreichbar ist, und sendet das
+# Ergebnis per UDP-IPC an den Lua-Knoten (data_mapper-Path
+# 'audio_probe').
+#
+# Hintergrund: in info-beamer (hosted, stable-0016) gibt es einen
+# bekannten SIGSEGV im Audio-Worker, sobald resource.load_audio mit
+# einer URL aufgerufen wird, die der Server nicht oder nicht mehr
+# bedient (404, DNS-Fail, Conn-Refused, Timeout, ...). Der Crash
+# nimmt den ganzen info-beamer-Prozess mit; Watchdog startet neu;
+# falls die URL weiter unerreichbar bleibt, entsteht eine Restart-
+# Schleife im Sekundentakt — Bildschirm wird permanent schwarz, bis
+# der Stream wieder antwortet. Aus Lua heraus laesst sich der Crash
+# nicht abfangen (passiert im nativen Worker-Thread nach Rueckkehr
+# von load_audio).
+#
+# Schutzmechanismus: bevor Lua resource.load_audio aufruft, muss von
+# diesem Sidecar ein frischer 'audio_probe:ok' eingetroffen sein.
+# Bei 'audio_probe:fail' blockiert Lua den (Re)load, sodass der
+# Worker nie eine kaputte URL sieht.
+#
+# Probe-Methode: ein GET mit Range: bytes=0-0 und stream=True. Body
+# wird nicht gelesen, Verbindung sofort geschlossen — minimaler
+# Bandbreitenverbrauch. HEAD vermeiden wir bewusst, weil Icecast in
+# der Praxis oft 405/501 darauf antwortet.
+# ============================================================
+
+# Probe-Intervall: ok-Fall 5 s, fail-Fall 3 s (schnellere Recovery).
+# Probe-Timeout: 0.9 s. Der Probe laeuft synchron im
+# sleep_with_time_ticks-Loop und blockiert dort die naechste Iteration
+# entsprechend lange — bei <1 s bleibt der nominelle 1-Hz-Takt fuer
+# das Time-IPC erhalten (eine einzelne Probe-Iteration ueberzieht
+# das Sleep-Budget nicht). Server, die laenger als 0.9 s zur Antwort
+# brauchen, werden als fail markiert; in der Praxis triggern solche
+# Server auch fuer load_audio Timeouts und sollten nicht angesprochen
+# werden.
+_PROBE_INTERVAL_OK   = 5.0
+_PROBE_INTERVAL_FAIL = 3.0
+_PROBE_TIMEOUT       = 0.9
+
+_audio_probe_state = {
+    "next_at":  0.0,
+    "last_url": None,
+}
+
+
+def push_audio_probe(result, url):
+    # Format: "ok:<url>" oder "fail:<url>". Lua matcht die URL gegen
+    # audio_stream.url, damit ein frisches Probe-Resultat fuer eine
+    # alte URL nicht versehentlich auf eine zwischenzeitlich
+    # geaenderte URL angewendet wird (Race-Schutz bei Setup-Aenderung
+    # im stale_after-Fenster). URL wird roh (Konfig-Form) gesendet
+    # — Lua's audio_stream.url ist ebenfalls roh, sanitize_url wird
+    # erst beim load_audio angewendet.
+    payload = (b"root/audio_probe:"
+               + result.encode("ascii") + b":"
+               + url.encode("utf-8"))
+    try:
+        _ipc_sock.sendto(payload, (IB_HOST, IB_PORT))
+    except Exception as e:
+        log("Audio-Probe-IPC fehlgeschlagen: %s" % e)
+
+
+def sanitize_url(url):
+    """Percent-kodiert UTF-8-Bytes >= 0x80. Identisches Verhalten wie
+    sanitize_url in node.lua: Probe und resource.load_audio sehen so
+    dieselbe URL — sonst koennten beide Pfade fuer nicht-ASCII URLs
+    auseinanderlaufen (Probe meldet fail wegen 404 auf unkodiertem
+    Pfad, obwohl load_audio mit kodierter URL funktionieren wuerde,
+    der Stream waere dauerhaft geblockt). Idempotent: bereits
+    prozentkodierte URLs bleiben unveraendert."""
+    if not url:
+        return url
+    if isinstance(url, bytes):
+        data = url
+    else:
+        data = url.encode("utf-8")
+    out = []
+    for b in data:
+        # Py2: bytes-Iteration liefert str(len=1); Py3: liefert int.
+        n = b if isinstance(b, int) else ord(b)
+        if n >= 0x80:
+            out.append("%%%02X" % n)
+        else:
+            out.append(chr(n))
+    return "".join(out)
+
+
+def probe_audio_url(url, verify):
+    try:
+        r = requests.get(
+            sanitize_url(url),
+            verify=verify,
+            timeout=_PROBE_TIMEOUT,
+            stream=True,
+            headers={"Range": "bytes=0-0"},
+        )
+        try:
+            r.close()
+        except Exception:
+            pass
+        # Konservativ: nur Status <400 als ok werten. Auth-Fehler
+        # (401/403) und 4xx/5xx sind aus Sicht von load_audio
+        # ebenfalls fehlgeschlagene Opens und koennen den SIGSEGV
+        # triggern — daher als fail markieren.
+        if r.status_code < 400:
+            return "ok"
+        return "fail"
+    except Exception:
+        return "fail"
+
+
+def maybe_probe_audio_stream(cfg):
+    enabled = bool(cfg.get("audio_stream_enabled"))
+    url     = (cfg.get("audio_stream_url") or "").strip()
+
+    # Stream deaktiviert oder URL leer → State zuruecksetzen, damit
+    # bei (Wieder-)Aktivierung sofort eine neue Probe laeuft.
+    # Zusaetzlich beim Aktiv→Inaktiv-Uebergang einen invalidierenden
+    # fail-Push an Lua schicken: sonst koennte ein noch frisches
+    # "ok" der alten URL bei einem schnellen Disable→Enable-Toggle
+    # (oder URL leeren+wieder eintragen) innerhalb stale_after fuer
+    # die wiederaktivierte URL gelten und load_audio sofort
+    # ausloesen — genau der Pfad, den der Probe-Gate verhindern soll.
+    if not enabled or not url:
+        if _audio_probe_state["last_url"] is not None:
+            push_audio_probe("fail", _audio_probe_state["last_url"])
+        _audio_probe_state["next_at"]  = 0.0
+        _audio_probe_state["last_url"] = None
+        return
+
+    now = time.time()
+    # URL-Wechsel erzwingt sofortige Neu-Probe (alter Probe-Timer
+    # bezog sich auf die alte URL).
+    if url != _audio_probe_state["last_url"]:
+        _audio_probe_state["next_at"] = 0.0
+    if now < _audio_probe_state["next_at"]:
+        return
+
+    verify = get_https_verify(cfg)
+    result = probe_audio_url(url, verify)
+    push_audio_probe(result, url)
+
+    _audio_probe_state["last_url"] = url
+    interval = _PROBE_INTERVAL_OK if result == "ok" else _PROBE_INTERVAL_FAIL
+    _audio_probe_state["next_at"] = now + interval
+
+
 def update_time(cfg):
     # Wenn das Overlay deaktiviert ist, schicken wir nichts — Lua
     # zeichnet es ohnehin nicht.
@@ -215,14 +396,22 @@ def update_time(cfg):
 
 
 def sleep_with_time_ticks(total_seconds):
-    """Schlaeft total_seconds, pusht den Zeit-Text jede Sekunde via
-    UDP an den Lua-Knoten — sodass das Zeit-Overlay nicht erst nach
-    poll_interval aktualisiert wird. Re-loaded config jede Sekunde,
-    damit Format-/Timezone-Aenderungen latenzarm einschlagen."""
+    """Schlaeft total_seconds, pusht den Zeit-Text grob im 1-Hz-Takt
+    via UDP an den Lua-Knoten — sodass das Zeit-Overlay nicht erst
+    nach poll_interval aktualisiert wird. Re-loaded config jede
+    Iteration, damit Format-/Timezone-Aenderungen latenzarm
+    einschlagen.
+
+    Der Takt ist annaehernd 1 Hz: ein synchrones Audio-Probe
+    (s. _PROBE_TIMEOUT, derzeit 0.9 s) kann eine Iteration leicht
+    verlaengern, bleibt aber unter der 1-s-Sleep-Schranke. Sekunden-
+    genaue Zeit-Formate koennen daher gelegentlich (~alle 5 s) leicht
+    nachhinken, bei %H:%M unmerklich."""
     end = time.time() + total_seconds
     while True:
         cfg = load_config()
         update_time(cfg)
+        maybe_probe_audio_stream(cfg)
         remaining = end - time.time()
         if remaining <= 0:
             return
@@ -231,7 +420,6 @@ def sleep_with_time_ticks(total_seconds):
 
 def main():
     last_manifest_hash = None
-    insecure_warning_active = False
 
     while True:
         try:
@@ -244,18 +432,10 @@ def main():
             default_dur    = int(cfg.get("default_duration") or 10)
             poll_interval  = max(5,  int(cfg.get("poll_interval")  or 60))
             retry_interval = max(5,  int(cfg.get("retry_interval") or 30))
-            verify         = not bool(cfg.get("allow_insecure_https"))
-
-            # urllib3-Warnings bei jeder Konfig-Aenderung (de)aktivieren.
-            if not verify and not insecure_warning_active:
-                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-                requests.packages.urllib3.disable_warnings(
-                    requests.packages.urllib3.exceptions.InsecureRequestWarning
-                )
-                log("WARNUNG: TLS-Pruefung abgeschaltet (allow_insecure_https=true).")
-                insecure_warning_active = True
-            elif verify:
-                insecure_warning_active = False
+            # verify + Warning-Handling zentral via get_https_verify,
+            # damit Probe-Loop (im sleep_with_time_ticks) und Haupt-
+            # Loop denselben Warning-Status sehen.
+            verify         = get_https_verify(cfg)
 
             if not playlist_url or not base_url:
                 log("playlist_url oder folien_base_url nicht konfiguriert.")
@@ -296,10 +476,22 @@ def main():
             # Fehlende Folien herunterladen. Filenames sind content-
             # adressiert (gleicher Name == gleicher Inhalt), daher reicht
             # eine Existenzpruefung im Cache.
+            #
+            # Vor jedem tatsaechlichen Download (nicht bei Cache-Hits)
+            # loest sleep_with_time_ticks(0) einen Zeit- und Audio-
+            # Probe-Tick aus, damit der Renderer auch waehrend
+            # laengerer Download-Phasen frische Heartbeats bekommt —
+            # sonst wuerde die Audio-Probe Lua-seitig stale
+            # (>stale_after, derzeit 60 s) und Reload pausiert unnoetig.
+            # Worst Case: ein einzelner Download blockiert bis 30 s —
+            # innerhalb dieses Fensters laeuft kein Tick, aber der
+            # Renderer erholt sich automatisch beim naechsten Tick
+            # zwischen den Downloads.
             for entry in entries:
                 local = slide_filename(entry["name"])
                 if os.path.exists(local):
                     continue
+                sleep_with_time_ticks(0)
                 try:
                     download_to(base_url + entry["name"], local, verify, 30)
                 except Exception as e:
