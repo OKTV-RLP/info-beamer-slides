@@ -431,21 +431,42 @@ local function unload_slot(slot)
     slot.res = nil
 end
 
+-- Returns true wenn aktuell irgendwo ein Image-Decode in Flight ist
+-- (s.res gesetzt, aber noch nicht "loaded"). Geprueft wird sowohl
+-- das aktuelle slides-Window als auch pending_slides[1] — beide
+-- teilen sich den globalen In-Flight-Gate, damit auf Pi 3B nie
+-- zwei PNG-Decodes parallel laufen.
+local function any_image_in_flight(start_idx)
+    local n = #slides
+    local lo = math.max(1, start_idx or 1)
+    local hi = math.min(n, lo + SLIDE_WINDOW - 1)
+    for i = lo, hi do
+        local s = slides[i]
+        if s and s.kind == "image" and s.res and not image_ready(s) then
+            return true
+        end
+    end
+    if pending_slides and pending_slides[1] then
+        local p = pending_slides[1]
+        if p.kind == "image" and p.res and not image_ready(p) then
+            return true
+        end
+    end
+    return false
+end
+
 -- Stellt sicher, dass slides[start_idx .. start_idx+SLIDE_WINDOW-1]
--- geladen sind und alle anderen disposed. Aufruf bei jedem
--- current_idx-Wechsel (inkl. Cycle-Wrap und IDLE->PLAYING).
+-- geladen sind und alle anderen disposed. Aufruf am Frame-Ende.
 --
 -- Loads laufen sequenziell: pro Aufruf wird hoechstens EIN neuer
--- Decode-Task an den Threadpool gegeben, und nur wenn aktuell kein
--- anderer Window-Slot im Decode-State ist. Auf Pi 3B verhindert das
--- Lastpeaks (parallele PNG-Decodes konkurrieren um CPU, RAM und
--- GEM-Allokationen — derselbe Druck, der den ursprünglichen OOM
--- ausgeloest hat). Bei typischen Slide-Dauern (>= 9 s) und
--- Decode-Zeiten (~0.5–1.5 s pro 1920x1080-PNG) reicht das fuer
--- monoton nachrueckende Window-Slots locker; nur am Window-Sprung
--- nach Manifest-Swap muessen ggf. zwei Folgefolien hintereinander
--- nachgeladen werden — das bleibt aber deutlich unter der
--- Slide-Standzeit.
+-- Decode-Task an den Threadpool gegeben, und nur wenn weder im
+-- Window noch in pending_slides[1] ein Decode in Flight ist.
+-- Reihenfolge: aktuelles Window zuerst (sichtbarer Bedarf),
+-- pending_slides[1] zuletzt (wird erst beim naechsten Cycle-Wrap
+-- gebraucht und hat damit typisch viele Slide-Dauern Vorlauf).
+-- Auf Pi 3B verhindert das Lastpeaks (parallele PNG-Decodes
+-- konkurrieren um CPU, RAM und GEM-Allokationen — derselbe Druck,
+-- der den urspruenglichen OOM ausgeloest hat).
 local function reconcile_window(start_idx)
     local n = #slides
     if n == 0 then return end
@@ -456,24 +477,23 @@ local function reconcile_window(start_idx)
             unload_slot(slides[i])
         end
     end
-    -- Pruefen, ob bereits ein In-Flight-Decode laeuft (s.res gesetzt
-    -- aber noch nicht "loaded"). Wenn ja, Trigger fuer weitere Slots
-    -- aussetzen — der naechste Frame schaut wieder rein.
-    local in_flight = false
-    for i = lo, hi do
-        local s = slides[i]
-        if s and s.kind == "image" and s.res and not image_ready(s) then
-            in_flight = true
-            break
-        end
-    end
-    if in_flight then return end
-    -- Den ersten noch nicht angetriggerten Slot in Reihenfolge laden.
+    if any_image_in_flight(start_idx) then return end
+    -- Phase 1: Aktuelles Window auffuellen (sichtbarer Bedarf zuerst).
     for i = lo, hi do
         local s = slides[i]
         if s and s.kind == "image" and not s.res and not s.failed then
             preload_slot(s)
             return
+        end
+    end
+    -- Phase 2: pending_slides[1] vorladen — wird beim naechsten
+    -- Cycle-Wrap als Crossfade-Target gebraucht. Erst hier, weil
+    -- der aktuelle Bedarf Vorrang hat. Slot 2..N von pending werden
+    -- erst nach dem Swap durch reconcile in Folgeframes nachgezogen.
+    if pending_slides and pending_slides[1] then
+        local p = pending_slides[1]
+        if p.kind == "image" and not p.res and not p.failed then
+            preload_slot(p)
         end
     end
 end
@@ -1476,13 +1496,10 @@ util.json_watch("manifest.json", function(m)
     dispose_list(pending_slides)
     pending_slides = loaded
 
-    -- Nur Slot 1 asynchron triggern, damit der Cycle-Wrap am
-    -- Zyklus-Ende (oder der sofortige Swap aus IDLE) eine bereits
-    -- dekodierte Slot-1-Textur vorfindet. Slot 2 / Slot 3 werden nach
-    -- dem Swap durch reconcile_window sequenziell nachgezogen — auf
-    -- Pi 3B vermeidet das parallele PNG-Decodes mit synchronen
-    -- CPU-/CMA-Spitzen.
-    preload_slot(pending_slides[1])
+    -- Kein eager Preload — reconcile_window triggert pending[1]
+    -- erst, wenn das aktuelle Window settled ist (kein In-Flight
+    -- Decode). Damit bleibt die Sequentialitaets-Garantie auch ueber
+    -- Manifest-Updates hinweg erhalten.
 
     if state == STATE_IDLE then
         -- Sofort einsetzen — kein laufender Zyklus, von dem wir
@@ -1499,7 +1516,9 @@ util.json_watch("manifest.json", function(m)
         reconcile_window(current_idx)
     end
     -- Sonst: bleibt als pending; Renderer swappt am Zyklus-Ende mit
-    -- Crossfade.
+    -- Crossfade. pending[1] wird durch das End-of-Frame-
+    -- reconcile_window vorgeladen (sequentialisiert mit dem aktuellen
+    -- slides-Window).
 end)
 
 ------------------------------------------------------------
