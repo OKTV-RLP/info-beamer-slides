@@ -48,11 +48,11 @@
             "type": "section"
         },
         {
-            "title": "Fade-Dauer (Sekunden)",
+            "title": "Fade-Dauer (Millisekunden)",
             "name": "fade_duration",
-            "type": "float",
-            "default": 0.5,
-            "hint": "Crossfade-Dauer zwischen zwei Folien (intra- und inter-Zyklus)."
+            "type": "integer",
+            "default": 500,
+            "hint": "Crossfade-Dauer in Millisekunden zwischen zwei Folien (intra- und inter-Zyklus). 0 = Harter Schnitt."
         },
         {
             "title": "Standard-Anzeigedauer (Sekunden)",
@@ -235,11 +235,11 @@
             "hint": "Pegelabsenkung der Hintergrundmusik während ein Vordergrund-Video spielt. 0 = keine Absenkung, -12 dB ≈ ¼ Lautstärke, -20 dB stark abgesenkt, ≤ -60 dB stumm. Werte > 0 werden auf 0 begrenzt."
         },
         {
-            "title": "Ducking-Übergang (Sekunden)",
+            "title": "Ducking-Übergang (Millisekunden)",
             "name": "audio_ducking_fade",
-            "type": "float",
-            "default": 0.25,
-            "hint": "Ramp-Dauer in Sekunden für das Ein- und Ausblenden des Duckings. 0.15–0.30 s wirken natürlich; höhere Werte überlagern länger, niedrigere klingen abrupt."
+            "type": "integer",
+            "default": 250,
+            "hint": "Ramp-Dauer in Millisekunden für das Ein- und Ausblenden des Duckings. 150–300 ms wirken natürlich; höhere Werte überlagern länger, niedrigere klingen abrupt."
         },
         {
             "title": "Hintergrund-Audio (Stream)",

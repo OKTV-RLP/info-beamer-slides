@@ -106,7 +106,7 @@ node.lua       ← Renderer:
 
 | Option | Default | Beschreibung |
 |---|---|---|
-| Fade-Dauer | 0.5 s | Crossfade-Dauer |
+| Fade-Dauer | 500 ms | Crossfade-Dauer |
 | Standard-Anzeigedauer | 10 s | Fallback wenn `#EXTINF` fehlt |
 
 ### Backup & Hintergrund
@@ -160,7 +160,7 @@ node.lua       ← Renderer:
 | Option | Default | Beschreibung |
 |---|---|---|
 | Ducking-Absenkung | 0 dB | Pegelabsenkung während FG-Video; 0 = aus, –12 dB ≈ ¼ Lautstärke, ≤ –60 dB stumm |
-| Ducking-Übergang | 0.25 s | Ramp-Dauer für Ein-/Ausblenden des Duckings |
+| Ducking-Übergang | 250 ms | Ramp-Dauer für Ein-/Ausblenden des Duckings |
 
 ## HTTP/HTTPS und self-signed-Zertifikate
 
@@ -335,7 +335,7 @@ Basispegel der Quelle. Beispiel: Stream-Lautstärke `–6 dB`, Ducking
 `–12 dB` → effektiv `–18 dB` während FG-Video läuft.
 
 **Übergang:** Amplituden-linearer Fade über *Ducking-Übergang*
-Sekunden (Default 0.25 s). 0 = harter Sprung. Die Pegel-Bewegung
+Millisekunden (Default 250 ms). 0 = harter Sprung. Die Pegel-Bewegung
 verteilt sich gleichmäßig über die ganze Fade-Dauer, statt — wie
 bei einer dB-linearen Rampe — vorne aggressiv abzufallen und hinten
 unhörbar auszutrudeln. Insbesondere bei Fade-zu-Stumm (`-60 dB`)
@@ -425,7 +425,7 @@ cat > config.json <<EOF
     "allow_insecure_https": false,
     "poll_interval": 60,
     "retry_interval": 30,
-    "fade_duration": 0.5,
+    "fade_duration": 500,
     "default_duration": 10,
     "backup_media": "empty.png",
     "background_media": "empty.png",
@@ -451,7 +451,7 @@ cat > config.json <<EOF
     "audio_jukebox_shuffle": false,
     "audio_jukebox_volume_db": 0,
     "audio_ducking_db": 0,
-    "audio_ducking_fade": 0.25
+    "audio_ducking_fade": 250
 }
 EOF
 

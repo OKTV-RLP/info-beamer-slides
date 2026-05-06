@@ -56,11 +56,15 @@ local json = require "json"
 -- Konfiguration
 ------------------------------------------------------------
 
+-- fade_duration und audio_ducking_fade sind im Setup in Millisekunden
+-- konfiguriert (UI-Skala) und werden hier in Sekunden gehalten —
+-- file_watch dividiert beim Read durch 1000. Sekunden passen direkt
+-- zu sys.now()-Differenzen, die in den Render-Loops gerechnet werden.
 local CONFIG = {
     fade_duration       = 0.5,
     default_duration    = 10,
     audio_ducking_db    = 0,     -- Absenkung waehrend FG-Video (<= 0)
-    audio_ducking_fade  = 0.25,  -- Rampe in Sekunden
+    audio_ducking_fade  = 0.25,  -- Rampe in Sekunden (= 250 ms im Setup)
 }
 
 -- Raw-Videos rendern in info-beamer auf einer eigenen Ebene außerhalb
@@ -1122,7 +1126,10 @@ end
 util.file_watch("config.json", function(raw)
     local cfg = json.decode(raw)
 
-    CONFIG.fade_duration    = tonumber(cfg.fade_duration)    or 0.5
+    -- fade_duration kommt als ms aus dem Setup (UI-Skala) und wird
+    -- intern in Sekunden gehalten, damit Differenzen mit sys.now()
+    -- direkt vergleichbar sind.
+    CONFIG.fade_duration    = (tonumber(cfg.fade_duration) or 500) / 1000
     CONFIG.default_duration = tonumber(cfg.default_duration) or 10
 
     -- Audio-Stream- UND Jukebox-Zustand ZUERST lesen — beide bestimmen
@@ -1184,9 +1191,11 @@ util.file_watch("config.json", function(raw)
     -- deaktiviert), darunter ist die Quelle praktisch stumm. Fade-Dauer
     -- darf nicht negativ werden — 0 bedeutet "harter Sprung".
     CONFIG.audio_ducking_db = clamp_db(tonumber(cfg.audio_ducking_db))
-    local fade = tonumber(cfg.audio_ducking_fade)
-    if fade == nil or fade < 0 then fade = 0.25 end
-    CONFIG.audio_ducking_fade = fade
+    -- audio_ducking_fade kommt als ms aus dem Setup, intern in Sekunden
+    -- (gleiche Skala wie sys.now()-Differenzen in apply_audio_levels).
+    local fade_ms = tonumber(cfg.audio_ducking_fade)
+    if fade_ms == nil or fade_ms < 0 then fade_ms = 250 end
+    CONFIG.audio_ducking_fade = fade_ms / 1000
 
     if files_changed or shuffle_changed then
         rebuild_jukebox_order()
