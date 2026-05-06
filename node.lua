@@ -1590,14 +1590,21 @@ function node.render()
             pcall(function() fg_video.res:place(0, 0, WIDTH, HEIGHT) end)
         end
     else
-        -- Gate aufloesen, sobald BG-Video state==playing oder Timeout.
-        -- BG-Slot kann zwischenzeitlich auf Image gewechselt sein (z. B.
-        -- Config-Update mid-Folie); dann ist nichts zu warten.
+        -- Gate aufloesen, sobald BG-Video placeable ist (oder Timeout).
+        -- Bewusst dieselbe Bedingung wie draw_slot()'s :place()-Aufruf
+        -- (video_placeable, also state ~= "loading"/"error"), nicht
+        -- state=="playing": draw_slot zieht das BG-Layer schon im
+        -- "loaded"-State in den Compositor — wenn das Gate erst auf
+        -- "playing" wartet, ist BG bereits 1+ Frames vor der Folie
+        -- sichtbar. Mit derselben Bedingung sind :place() und das
+        -- Zeichnen der Folie im gleichen Frame, der naechste vsync
+        -- committet beide synchron. BG-Slot kann zwischenzeitlich auf
+        -- Image gewechselt sein (Config-Update mid-Folie); dann ist
+        -- nichts zu warten.
         if bg_resume_gate then
-            local ready = false
+            local ready
             if background_slot.kind == "video" and background_slot.res then
-                local ok, st = pcall(function() return background_slot.res:state() end)
-                ready = ok and st == "playing"
+                ready = video_placeable(background_slot.res)
             else
                 ready = true
             end
