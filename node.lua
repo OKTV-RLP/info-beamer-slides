@@ -435,6 +435,20 @@ local function image_ready(slot)
     return ok2 and (tonumber(w) or 0) > 0
 end
 
+-- Image-Slot ist konkret zeichenbar: Resource existiert, ist
+-- erfolgreich dekodiert und nicht als failed markiert. Strenger
+-- als image_ready() — letztere liefert aus Gate-Sicht true fuer
+-- failed-Slots, damit der globale In-Flight-Gate nicht permanent
+-- blockt; im Render-Pfad ist diese Sicht falsch, weil ein failed-
+-- Slot keinen halben Crossfade zeigen soll, sondern auf
+-- draw_fit(nil) -> reines BG zurueckfaellt. Wird bei Crossfade-
+-- Entscheidungen genutzt (Cycle-Fade can_fade, Out-Fade-Branch).
+local function image_drawable(slot)
+    if not slot or slot.kind ~= "image" then return false end
+    if slot.failed or not slot.res     then return false end
+    return image_ready(slot)
+end
+
 -- Asynchron einen Image-Slot laden. Idempotent: wiederholte Aufrufe
 -- waehrend des Decodes sind no-ops. Video-Slots sind explizit
 -- ausgenommen — sie laufen ueber fg_video_load (eigener Lifecycle,
@@ -2026,13 +2040,16 @@ function node.render()
             local slide_drawn = false
             if outgoing then
                 local cycle_elapsed = t - cycle_fade_start
-                -- Cycle-Fade nur, wenn die neue Slot-1-Textur draw-ready
-                -- ist. Im Normalfall haben Manifest-Handler und
-                -- reconcile_window sie laengst preloaded; Defensive
-                -- Pruefung gegen die seltene Race "Cycle-Wrap fiel mit
-                -- Decode-Latenz zusammen".
-                local can_fade = (outgoing.kind == "image")
-                                 and image_ready(slides[current_idx])
+                -- Cycle-Fade nur, wenn beide Resourcen (outgoing UND
+                -- neue Slot-1-Textur) konkret zeichenbar sind.
+                -- image_drawable verlangt non-nil res + nicht failed
+                -- (image_ready allein wuerde failed-Slots als ready
+                -- behandeln und draw_crossfade mit nil-cur.res
+                -- aufrufen — slide_drawn=true blockiert dann den
+                -- Fallback-Draw).
+                local can_fade = outgoing.res
+                                 and outgoing.kind == "image"
+                                 and image_drawable(slides[current_idx])
                 if can_fade and fade_dur > 0 and cycle_elapsed < fade_dur then
                     local progress = cycle_elapsed / fade_dur
                     draw_crossfade(outgoing.res, cur.res, progress)
@@ -2046,12 +2063,15 @@ function node.render()
                 local cur_dur = math.max(cur.duration, fade_dur)
                 local fade_at = cur_dur - fade_dur
                 local nxt     = slides[current_idx + 1]
-                -- Out-Fade nur starten, wenn die naechste Folie ready
-                -- ist. Sonst draw_fit(cur.res) → Folie steht etwas
-                -- laenger und das eigentliche Advance-Gate
-                -- (should_advance) verzoegert den Wechsel synchron.
-                if nxt and nxt.kind == "image"
-                   and image_ready(nxt)
+                -- Out-Fade nur starten, wenn beide Folien konkret
+                -- zeichenbar sind. image_drawable schlaegt failed-
+                -- Slots aus (sonst draw_crossfade mit nil-Resource —
+                -- waere effektiv ein verschluckter Fade ohne
+                -- Fallback-Draw). Bei nicht-zeichenbarem nxt steht
+                -- cur ueber das Advance-Gate ohnehin laenger; bei
+                -- nicht-zeichenbarem cur (failed-Slide) zeigt
+                -- draw_fit(cur.res=nil) reines BG fuer cur_dur.
+                if image_drawable(cur) and image_drawable(nxt)
                    and fade_dur > 0 and elapsed >= fade_at
                    and current_idx < #slides then
                     local progress = math.min(1, (elapsed - fade_at) / fade_dur)
