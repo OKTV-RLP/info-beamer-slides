@@ -144,6 +144,29 @@ local last_cur       = nil    -- zuletzt gerenderte Folie (Slide-Wechsel-Hook)
 local outgoing         = nil   -- nil oder {res, dispose_after}
 local cycle_fade_start = 0
 
+-- Visuelle Synchronisierung GL-Surface (Layer 0) <-> Raw-Video-Layer
+-- (-3/-1) bei Wechseln zwischen Image+BG-Video und FG-Video. Raw-Videos
+-- werden vom Compositor unabhaengig von der GL-Pipeline gepostet —
+-- :dispose() schlaegt typisch erst einen Compositor-Frame spaeter durch,
+-- :load_video braucht Decoder-Spinup. Ohne Korrektur:
+--   * Image+BG -> FG-Video: Image weg in Frame N+1 (GL-clear sofort),
+--     BG erst in N+2 weg (Compositor-Lag). 1 Frame "nur BG".
+--   * FG-Video -> Image+BG: FG weg in N+1, Image sofort gezeichnet,
+--     BG-Video poppt in N+k rein (loading->playing).
+local pending_image_hold_res = nil  -- Image-Resource, die im Frame nach
+                                    -- Image->Video-Wechsel noch einmal
+                                    -- gezeichnet wird (kompensiert den
+                                    -- 1-Frame-Lag des BG-Dispose).
+local bg_resume_gate         = nil  -- {deadline,last_tick}. Solange
+                                    -- gesetzt: Image-Pfad zeichnet die
+                                    -- Folie nicht (Time-Overlay und
+                                    -- Cornerlogo laufen weiter), bis
+                                    -- das resumte BG-Video state==
+                                    -- "playing" liefert.
+local BG_RESUME_GATE_TIMEOUT = 0.5  -- Sicherheits-Fallback (Sek.) gegen
+                                    -- kaputtes BG-Video, das nie
+                                    -- "playing" erreicht.
+
 -- Audio-Routing-Status: "background" | "backup" | "stream" | "jukebox" | nil
 local audio_active = nil
 
@@ -1371,6 +1394,8 @@ function node.render()
         -- bei haengendem bg_yielded_state (z. B. nach fehlgeschlagenem
         -- fg_video_load), wo fg_video.res selbst nil ist.
         leave_video_slide_if_active()
+        pending_image_hold_res = nil
+        bg_resume_gate         = nil
         if backup_slot.kind == "video" and backup_slot.res then
             -- Backup-Video übernimmt voll: das Video liegt auf Layer -2
             -- hinter der (transparenten) GL-Surface und überdeckt das
@@ -1398,7 +1423,9 @@ function node.render()
     -- PLAYING
     if #slides == 0 then
         leave_video_slide_if_active()
-        last_cur = nil
+        last_cur               = nil
+        pending_image_hold_res = nil
+        bg_resume_gate         = nil
         state = STATE_IDLE
         return
     end
@@ -1410,7 +1437,9 @@ function node.render()
     -- fg_video_load weiter unten.
     if not cur then
         leave_video_slide_if_active()
-        last_cur = nil
+        last_cur               = nil
+        pending_image_hold_res = nil
+        bg_resume_gate         = nil
         state = STATE_IDLE
         return
     end
@@ -1426,6 +1455,20 @@ function node.render()
     -- ueberdecken), bei Image-Folien oder Video-Folien-Lade-Fehler aber
     -- schon. Bei Video-BG ist background_slot via background_yield()
     -- ohnehin disposed, dann ist der Aufruf eh ein No-op.
+
+    -- Slide-Timing waehrend bg_resume_gate aktiv ist einfrieren:
+    -- slide_started kontinuierlich nachschieben, sodass elapsed konstant
+    -- bleibt. Ohne diese Pause wuerde die effektive Sichtbarkeitsdauer
+    -- (und ggf. der Out-Fade) der wartenden Image-Folie um bis zu
+    -- BG_RESUME_GATE_TIMEOUT verkuerzt — die Folie ist im Gate-Fenster
+    -- nicht sichtbar, soll aber ihre volle Standzeit bekommen, sobald
+    -- das BG-Video Frames liefert.
+    if bg_resume_gate then
+        if bg_resume_gate.last_tick then
+            slide_started = slide_started + (t - bg_resume_gate.last_tick)
+        end
+        bg_resume_gate.last_tick = t
+    end
 
     local fade_dur = math.max(0, CONFIG.fade_duration)
     local elapsed  = t - slide_started
@@ -1482,6 +1525,21 @@ function node.render()
     -- der Frame haette weder FG-Video noch Hintergrund.
     if cur ~= last_cur then
         if cur.kind == "video" then
+            -- Image->Video: alte Image-Folie fuer 1 Frame nach dem
+            -- Wechsel halten, sodass BG-Video (Compositor-Lag) und
+            -- Image (GL-Surface) gleichzeitig vom Schirm verschwinden.
+            -- Nur bei Video-BG: Image-BG hat keinen Compositor-Lag
+            -- (verschwindet synchron mit der GL-Surface via clear), das
+            -- Hold waere dort unnoetig und koennte ein bereits
+            -- placeable FG-Video 1 Frame verdecken. Pruefung muss VOR
+            -- background_yield() laufen, weil yield() background_slot
+            -- auf nil setzt. Resource lebt bis zum Render weiter — bei
+            -- Cycle-Wrap sorgt set_outgoing/swap_slides dafuer, dass
+            -- die letzte Folie nicht direkt disposed wird.
+            if last_cur and last_cur.kind == "image" and last_cur.res
+               and background_slot.kind == "video" and background_slot.res then
+                pending_image_hold_res = last_cur.res
+            end
             background_yield()
             if not fg_video_load(cur) then
                 background_resume()
@@ -1489,6 +1547,15 @@ function node.render()
         elseif last_cur and last_cur.kind == "video" then
             fg_video_unload()
             background_resume()
+            -- Video->Image+BG-Video: Gate setzen, damit die Image-Folie
+            -- erst gezeichnet wird, wenn das BG-Video sein erstes Frame
+            -- liefert. Bei Image-BG (kein Reload) ist nichts zu warten.
+            if background_slot.kind == "video" and background_slot.res then
+                bg_resume_gate = {
+                    deadline  = t + BG_RESUME_GATE_TIMEOUT,
+                    last_tick = t,
+                }
+            end
         end
         last_cur = cur
     end
@@ -1508,38 +1575,69 @@ function node.render()
         -- damit das FG-Video auf Layer -1 voll sichtbar ist. Bei Lade-
         -- Fehler bleibt zumindest das BG sichtbar, bis im naechsten
         -- Frame der should_advance-Pfad weiterspringt.
+        --
+        -- Ausnahme: pending_image_hold_res zeichnet die alte Image-Folie
+        -- noch genau einen Frame, damit BG-Video (Compositor-Lag) und
+        -- Image (GL-Surface) gleichzeitig verschwinden. Muss VOR
+        -- end_cycle_fade() laufen, weil end_cycle_fade() die Resource
+        -- am Cycle-Boundary disposen kann.
+        if pending_image_hold_res then
+            pcall(function() draw_fit(pending_image_hold_res, 1) end)
+            pending_image_hold_res = nil
+        end
         end_cycle_fade()
         if video_placeable(fg_video.res) then
             pcall(function() fg_video.res:place(0, 0, WIDTH, HEIGHT) end)
         end
     else
-        -- Image-Pfad. Crossfade nur Image↔Image — Outgoing oder Nachfolger
-        -- als Video → Hard-Cut (kein Shader-Sample auf raw-Videos
-        -- moeglich).
-        local slide_drawn = false
-        if outgoing then
-            local cycle_elapsed = t - cycle_fade_start
-            local can_fade = (outgoing.kind == "image")
-            if can_fade and fade_dur > 0 and cycle_elapsed < fade_dur then
-                local progress = cycle_elapsed / fade_dur
-                draw_crossfade(outgoing.res, cur.res, progress)
-                slide_drawn = true
+        -- Gate aufloesen, sobald BG-Video state==playing oder Timeout.
+        -- BG-Slot kann zwischenzeitlich auf Image gewechselt sein (z. B.
+        -- Config-Update mid-Folie); dann ist nichts zu warten.
+        if bg_resume_gate then
+            local ready = false
+            if background_slot.kind == "video" and background_slot.res then
+                local ok, st = pcall(function() return background_slot.res:state() end)
+                ready = ok and st == "playing"
             else
-                end_cycle_fade()
+                ready = true
+            end
+            if ready or t >= bg_resume_gate.deadline then
+                bg_resume_gate = nil
             end
         end
 
-        if not slide_drawn then
-            local cur_dur = math.max(cur.duration, fade_dur)
-            local fade_at = cur_dur - fade_dur
-            local nxt     = slides[current_idx + 1]
-            if nxt and nxt.kind == "image"
-               and fade_dur > 0 and elapsed >= fade_at
-               and current_idx < #slides then
-                local progress = math.min(1, (elapsed - fade_at) / fade_dur)
-                draw_crossfade(cur.res, nxt.res, progress)
-            else
-                draw_fit(cur.res, 1)
+        -- Image-Pfad. Crossfade nur Image↔Image — Outgoing oder Nachfolger
+        -- als Video → Hard-Cut (kein Shader-Sample auf raw-Videos
+        -- moeglich). Bei aktivem bg_resume_gate wird die Folie nicht
+        -- gezeichnet (Time-Overlay und Cornerlogo laufen weiter), sodass
+        -- FG-Folie und BG-Video gemeinsam erscheinen statt das Image vor
+        -- dem BG-Pop zu zeigen.
+        if not bg_resume_gate then
+            local slide_drawn = false
+            if outgoing then
+                local cycle_elapsed = t - cycle_fade_start
+                local can_fade = (outgoing.kind == "image")
+                if can_fade and fade_dur > 0 and cycle_elapsed < fade_dur then
+                    local progress = cycle_elapsed / fade_dur
+                    draw_crossfade(outgoing.res, cur.res, progress)
+                    slide_drawn = true
+                else
+                    end_cycle_fade()
+                end
+            end
+
+            if not slide_drawn then
+                local cur_dur = math.max(cur.duration, fade_dur)
+                local fade_at = cur_dur - fade_dur
+                local nxt     = slides[current_idx + 1]
+                if nxt and nxt.kind == "image"
+                   and fade_dur > 0 and elapsed >= fade_at
+                   and current_idx < #slides then
+                    local progress = math.min(1, (elapsed - fade_at) / fade_dur)
+                    draw_crossfade(cur.res, nxt.res, progress)
+                else
+                    draw_fit(cur.res, 1)
+                end
             end
         end
     end
