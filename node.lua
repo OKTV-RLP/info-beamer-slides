@@ -379,6 +379,23 @@ end
 -- CMA-Budget.
 local SLIDE_WINDOW = 5
 
+-- Image-Resource eines Slots freigeben, mit Outgoing-Handoff:
+-- wenn die Resource gerade vom Cycle-Crossfade als outgoing
+-- referenziert wird, uebernimmt set_outgoing/swap_slides die
+-- Disposal-Verantwortung — wir markieren nur dispose_after, sonst
+-- wuerde der noch laufende Cycle-Fade ploetzlich auf eine disposede
+-- Textur zeichnen. Wird aus image_ready (Error-Branch) und
+-- unload_slot genutzt.
+local function dispose_slot_resource(slot)
+    if not slot or not slot.res then return end
+    if outgoing and outgoing.res == slot.res then
+        outgoing.dispose_after = true
+    else
+        pcall(function() slot.res:dispose() end)
+    end
+    slot.res = nil
+end
+
 -- Image-Resource ist draw-ready, sobald der async Decoder fertig ist.
 -- info-beamer 2.x liefert :state() == "loaded" fuer Image-Resources;
 -- als Fallback (aeltere Builds, fehlende Methode) prueft :size() — eine
@@ -389,11 +406,14 @@ local SLIDE_WINDOW = 5
 --
 -- :state() == "error" (Decode-Fehler nach erfolgreichem Load-Aufruf,
 -- z.B. korrupte Datei, unsupported PNG-Variante) markiert den Slot
--- als failed und gibt true zurueck — andernfalls bliebe er permanent
--- "not ready" und wuerde den globalen any_image_in_flight()-Gate
--- dauerhaft blockieren. Unbekannte States (zukuenftige info-beamer-
--- Versionen, Race-Conditions) fallen auf den :size()-Heuristik-Pfad
--- zurueck, statt fix mit false zu antworten.
+-- als failed, gibt die GPU-Resource sofort frei (sonst weiter
+-- belegtes GPU-RAM und Render-Pfade wuerden gegen die kaputte
+-- Textur zeichnen) und liefert true zurueck — andernfalls bliebe der
+-- Slot permanent "not ready" und wuerde den globalen
+-- any_image_in_flight()-Gate dauerhaft blockieren.
+-- Unbekannte States (zukuenftige info-beamer-Versionen, Race-
+-- Conditions) fallen auf den :size()-Heuristik-Pfad zurueck, statt
+-- fix mit false zu antworten.
 local function image_ready(slot)
     if not slot then return false end
     if slot.failed then return true end
@@ -405,6 +425,7 @@ local function image_ready(slot)
         if st == "error"  then
             slot.failed = true
             print("Folie nicht dekodierbar: " .. tostring(slot.file))
+            dispose_slot_resource(slot)
             return true
         end
         if st == "loading" then return false end
@@ -432,18 +453,12 @@ local function preload_slot(slot)
 end
 
 -- Image-Slot disposen, wenn er aus dem Vorlade-Fenster faellt.
--- Wenn die Resource gerade vom Cycle-Crossfade als outgoing
--- referenziert wird, uebernimmt set_outgoing/swap_slides die
--- Disposal-Verantwortung — wir geben sie hier nur frei.
+-- dispose_slot_resource uebernimmt das Outgoing-Handoff fuer
+-- Resources, die gerade vom Cycle-Crossfade gehalten werden.
 local function unload_slot(slot)
     if not slot or not slot.res    then return end
     if slot.kind ~= "image"        then return end
-    if outgoing and outgoing.res == slot.res then
-        outgoing.dispose_after = true
-    else
-        pcall(function() slot.res:dispose() end)
-    end
-    slot.res = nil
+    dispose_slot_resource(slot)
 end
 
 -- Returns true wenn aktuell irgendwo ein Image-Decode in Flight ist
