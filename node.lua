@@ -1443,10 +1443,16 @@ function node.render()
             -- Image->Video: alte Image-Folie fuer 1 Frame nach dem
             -- Wechsel halten, sodass BG-Video (Compositor-Lag) und
             -- Image (GL-Surface) gleichzeitig vom Schirm verschwinden.
-            -- Resource lebt bis zum Render unten weiter — bei Cycle-
-            -- Wrap sorgt set_outgoing/swap_slides dafuer, dass die
-            -- letzte Folie nicht direkt disposed wird.
-            if last_cur and last_cur.kind == "image" and last_cur.res then
+            -- Nur bei Video-BG: Image-BG hat keinen Compositor-Lag
+            -- (verschwindet synchron mit der GL-Surface via clear), das
+            -- Hold waere dort unnoetig und koennte ein bereits
+            -- placeables FG-Video 1 Frame verdecken. Pruefung muss VOR
+            -- background_yield() laufen, weil yield() background_slot
+            -- auf nil setzt. Resource lebt bis zum Render weiter — bei
+            -- Cycle-Wrap sorgt set_outgoing/swap_slides dafuer, dass
+            -- die letzte Folie nicht direkt disposed wird.
+            if last_cur and last_cur.kind == "image" and last_cur.res
+               and background_slot.kind == "video" and background_slot.res then
                 pending_image_hold_res = last_cur.res
             end
             background_yield()
