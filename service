@@ -29,6 +29,10 @@ import hashlib
 import traceback
 import datetime
 
+# Python-2-Importpfade — der Sidecar-Shebang oben ist /usr/bin/python2.7.
+from urlparse import urlsplit, urljoin
+from urllib   import unquote
+
 import requests
 import urllib3
 import pytz
@@ -92,10 +96,61 @@ def get_https_verify(cfg):
     return verify
 
 
+def basename_from_entry(entry):
+    # Basename = letzter Pfad-Segmentteil ohne Query-/Fragment-Anteil.
+    # urlsplit funktioniert fuer alle Eintragsformen — auch fuer reine
+    # Pfade ("foo.png?v=2") und server-absolute Pfade ("/abs/foo.png")
+    # — und schneidet Query/Fragment dabei zuverlaessig ab. Damit
+    # fallen "foo.png?v=2" und "foo.png?v=3" auf denselben Cache-Slot
+    # (Cache-Invariante: Basename = Content-Identitaet).
+    path = urlsplit(entry).path
+    name = path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    # Percent-Encoding (z. B. "%C3%A4" -> "ä") aufloesen, damit der
+    # lokale Cache-Filename in der gleichen Form vorliegt wie ein
+    # direkt UTF-8 angegebener Eintrag — sonst wuerden gleicher
+    # Inhalt unter zwei Encodings doppelt gecached.
+    #
+    # Py2-Detail: urllib.unquote ist Byte-orientiert. Auf einem
+    # unicode-Input behandelt es jedes "%XX" als einzelnes Code-
+    # Point — das wuerde aus "%C3%A4" ein u"\xc3\xa4" (= "Ã¤")
+    # machen statt des korrekten u"\xe4" (= "ä"). Korrekt: erst zu
+    # UTF-8-bytes encoden, percent-decoden, dann wieder als UTF-8
+    # decoden. Bei Latin-1-percent-Encoding (selten in M3U) faengt
+    # errors="replace" das einzelne Byte mit U+FFFD ab, ohne
+    # den Service-Loop zu killen.
+    if isinstance(name, unicode):
+        name = unquote(name.encode("utf-8")).decode("utf-8", errors="replace")
+    else:
+        name = unquote(name).decode("utf-8", errors="replace")
+    # Sanitize post-unquote: percent-encoded Path-Separatoren ("%2F" ->
+    # "/", "%5C" -> "\") oder NUL-Bytes ("%00") koennten den lokalen
+    # Cache-Filename in einen Pfad mit Subdir-Anteil oder ein Filesystem-
+    # unfreundliches Token verwandeln (Path-Traversal-Risiko: ein
+    # Eintrag wie "..%2F..%2Fnode.lua" wuerde sonst zu "../../node.lua"
+    # decoden). Nochmaliges rsplit ueber beide Separatoren plus NUL-
+    # Strip stellt sicher, dass am Ende eine einzelne Filename-Komponente
+    # bleibt.
+    name = name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    name = name.replace("\x00", "")
+    return name
+
+
 def parse_playlist(text, default_dur):
     # M3U und M3U8 sind syntaktisch identisch — der Unterschied liegt
     # nur im erwarteten Encoding (M3U: oft Latin-1/Win-1252; M3U8:
     # UTF-8). Encoding-Behandlung passiert im Caller via r.encoding.
+    #
+    # Eintraege koennen sein:
+    #   * reiner Dateiname           "clip.mp4"
+    #   * relativer Pfad             "videos/clip.mp4"
+    #   * vollstaendige URL          "https://cdn.example.com/clip.mp4"
+    # In allen Faellen ist der Basename die kanonische Cache-/Content-
+    # Identitaet (siehe basename_from_entry); der Original-Eintrag wird
+    # zusaetzlich als "url" gefuehrt und erst beim Download gegen die
+    # effektive Basis-URL aufgeloest (zusammengesetzt aus playlist_url
+    # und base_url, s. main()). Voraussetzung: der Inhaltslieferant
+    # garantiert "gleicher Basename = gleicher Inhalt" (aufrufende
+    # Server enforcen das).
     entries = []
     duration = default_dur
     for line in text.splitlines():
@@ -106,11 +161,13 @@ def parse_playlist(text, default_dur):
             except Exception:
                 pass
         elif line and not line.startswith("#"):
-            # Nur Dateiname, falls die Playlist absolute oder relative
-            # Pfade enthaelt.
-            name = line.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+            name = basename_from_entry(line)
             if name:
-                entries.append({"name": name, "duration": duration})
+                entries.append({
+                    "name":     name,
+                    "url":      line,
+                    "duration": duration,
+                })
             duration = default_dur
     return entries
 
@@ -427,8 +484,8 @@ def main():
             # Zeit jede Hauptiteration auch frisch schreiben (zusaetzlich
             # zum 1-Hz-Tick im sleep_with_time_ticks).
             update_time(cfg)
-            playlist_url   = (cfg.get("playlist_url")    or "").strip()
-            base_url       = (cfg.get("folien_base_url") or "").strip()
+            playlist_url   = (cfg.get("playlist_url") or "").strip()
+            cfg_base_url   = (cfg.get("base_url")     or "").strip()
             default_dur    = int(cfg.get("default_duration") or 10)
             poll_interval  = max(5,  int(cfg.get("poll_interval")  or 60))
             retry_interval = max(5,  int(cfg.get("retry_interval") or 30))
@@ -437,13 +494,35 @@ def main():
             # Loop denselben Warning-Status sehen.
             verify         = get_https_verify(cfg)
 
-            if not playlist_url or not base_url:
-                log("playlist_url oder folien_base_url nicht konfiguriert.")
+            if not playlist_url:
+                log("playlist_url nicht konfiguriert.")
                 sleep_with_time_ticks(retry_interval)
                 continue
 
-            if not base_url.endswith("/"):
-                base_url += "/"
+            # Effektive Basis-URL fuer Playlist-Eintraege berechnen.
+            # urljoin-Kette deckt alle drei base_url-Faelle ohne
+            # Fallunterscheidung ab:
+            #   leer       -> urljoin(playlist_url, "./") -> Playlist-Dir
+            #   relativ    -> urljoin(playlist_url, base_url) -> aufgeloest gegen Playlist-Dir
+            #   absolut    -> urljoin(playlist_url, base_url) -> base_url (urljoin erkennt http/https)
+            #
+            # Trailing-"/"-Normalisierung: ohne abschliessenden Slash
+            # behandelt urljoin den Wert als Datei und urljoin gegen
+            # einen Eintrag wuerde den letzten Pfadteil verwerfen
+            # ("https://cdn/v" + "clip.mp4" = "https://cdn/clip.mp4",
+            # "/v" geht verloren). Wir forcen "/" am Ende — egal ob
+            # relativ oder absolut. Eintraege mit Query/Fragment lassen
+            # wir aber in Ruhe: das sieht nach einer absichtlich
+            # angegebenen Datei-URL aus, die wir nicht uminterpretieren
+            # sollten.
+            if cfg_base_url:
+                _parts = urlsplit(cfg_base_url)
+                if not _parts.query and not _parts.fragment \
+                        and not cfg_base_url.endswith("/"):
+                    cfg_base_url += "/"
+                base_url = urljoin(playlist_url, cfg_base_url)
+            else:
+                base_url = urljoin(playlist_url, "./")
 
             # Playlist holen. Wenn der Server keinen Charset-Header
             # mitliefert, raet requests fuer text/*-Content-Types
@@ -492,11 +571,22 @@ def main():
                 if os.path.exists(local):
                     continue
                 sleep_with_time_ticks(0)
+                # base_url wurde oben aus playlist_url + cfg_base_url
+                # zur effektiven Basis aufgeloest. urljoin gegen den
+                # Playlist-Eintrag verhaelt sich dann nach RFC 3986:
+                #   * absolute URL (http://, https://) -> bleibt unveraendert
+                #   * server-absoluter Pfad ("/x.mp4") -> base_url-Host + Pfad
+                #   * relativer Pfad/Filename          -> base_url + entry
+                # Damit funktionieren reine Filenames, Unterverzeichnisse
+                # und vollstaendige Fremd-Server-URLs gleichermassen,
+                # unabhaengig davon, ob cfg_base_url leer, relativ oder
+                # absolut konfiguriert wurde.
+                download_url = urljoin(base_url, entry["url"])
                 try:
-                    download_to(base_url + entry["name"], local, verify, 30)
+                    download_to(download_url, local, verify, 30)
                 except Exception as e:
-                    log("Folie-Download fehlgeschlagen %s: %s" %
-                        (entry["name"], e))
+                    log("Folie-Download fehlgeschlagen %s (%s): %s" %
+                        (entry["name"], download_url, e))
 
             # Cache aufraeumen: entferne nur Files mit unserem Praefix,
             # die nicht mehr in der aktuellen Playlist sind, sowie

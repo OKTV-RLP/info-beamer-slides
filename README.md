@@ -41,8 +41,12 @@ node.lua       ← Renderer:
 - Der Renderer wendet ein neues Manifest am **Ende des aktuellen
   Zyklus** an, mit Crossfade von der letzten Folie der alten Liste
   zur ersten Folie der neuen.
-- Folien-Filenames sind content-adressiert; der Cache prüft daher nur
-  auf Existenz, kein Hash-Vergleich, keine Re-Downloads.
+- Cache-Identität ist der Basename des Playlist-Eintrags (gleicher
+  Basename ⇒ gleicher Inhalt, vom Server zugesichert); der Cache prüft
+  daher nur auf Existenz, kein Hash-Vergleich, keine Re-Downloads.
+  Vollständige URLs, relative Unterverzeichnisse und reine Dateinamen
+  in der Playlist sind alle erlaubt — siehe *Playlist-Format und
+  Adressierung*.
 - Zeit-Overlay-Updates gehen per UDP an `127.0.0.1:4444` — keine
   SD-Schreibzyklen, sub-Sekunden-Latenz Service → Renderer.
 
@@ -76,9 +80,11 @@ node.lua       ← Renderer:
 1. Diesen Ordner als Package nach info-beamer hosted hochladen
    (`Packages → Upload`).
 2. Auf Basis des Packages ein Setup anlegen.
-3. **Quelle**: `Playlist-URL` und `Folien-Basis-URL` des Infotext-
-   Servers eintragen. Bei selbstsigniertem Zertifikat *Self-signed-
-   HTTPS akzeptieren* einschalten.
+3. **Quelle**: `Playlist-URL` eintragen. `Basis-URL` optional — leer
+   lassen, wenn Folien neben der Playlist liegen; sonst relatives
+   Verzeichnis (`videos/`) oder vollständige URL (`https://cdn/...`)
+   eintragen. Bei selbstsigniertem Zertifikat *Self-signed-HTTPS
+   akzeptieren* einschalten.
 4. **Optional Backup/Hintergrund**: eigenes Bild- oder Video-Asset
    hochladen und im Setup auswählen.
 5. **Optional Zeit-Overlay**: aktivieren, Format und Position einstellen.
@@ -97,7 +103,7 @@ node.lua       ← Renderer:
 | Option | Default | Beschreibung |
 |---|---|---|
 | Playlist-URL | – | M3U8-Playlist-URL (http:// oder https://) |
-| Folien-Basis-URL | – | Verzeichnis-URL der Folien-Bilder |
+| Basis-URL | "" | Wurzel für relative Playlist-Einträge (s. *Playlist-Format*). Leer = Verzeichnis der Playlist-URL |
 | Self-signed-HTTPS akzeptieren | false | TLS-Prüfung deaktivieren |
 | Polling-Intervall | 60 s | Wie oft der Service die Playlist prüft |
 | Wiederholversuch | 30 s | Pause nach HTTP-Fehler oder leerer Playlist |
@@ -409,13 +415,54 @@ Sekunde):
 - Für Video-Loops: Raspberry Pi 4 oder neuer.
 - Für Audio-Stream: Pi-Build mit `sys.provides("audio")`.
 
+## Playlist-Format und Adressierung
+
+Die M3U/M3U8-Playlist kann pro Eintrag drei Schreibweisen enthalten,
+die zusammen mit dem Setup-Wert *Basis-URL* (`base_url`) auflösen:
+
+**Basis-URL-Auflösung (Setup-Feld `base_url`):**
+
+| `base_url`-Wert | Effektive Basis für relative Playlist-Einträge |
+|---|---|
+| Leer (Default) | Verzeichnis der Playlist-URL |
+| Relativ, z. B. `videos/` | Playlist-Verzeichnis + `videos/` |
+| Vollständige URL, z. B. `https://cdn.example.com/v/` | wird komplett übernommen |
+
+**Playlist-Eintrag-Auflösung:**
+
+| Schreibweise | Beispiel | Wirkung |
+|---|---|---|
+| Reiner Dateiname | `clip.mp4` | wird gegen die effektive Basis-URL aufgelöst |
+| Relativer Pfad | `videos/clip.mp4` | wird gegen die effektive Basis-URL aufgelöst |
+| Vollständige URL | `https://cdn.example.com/v/clip.mp4` | absolut, ignoriert `base_url` |
+| Server-absoluter Pfad | `/abs/clip.mp4` | gegen den Host der effektiven Basis-URL |
+
+Beispiel: `playlist_url = https://server/show/list.m3u8`,
+`base_url = videos/`, Eintrag `clip.mp4` →
+Download von `https://server/show/videos/clip.mp4`.
+
+Query-Strings und Fragmente in URLs werden beim Download mitgesendet,
+fließen aber nicht in den Cache-Filename ein.
+
+**Cache-Identität ist immer der Basename**: `clip.mp4` aus
+`cdn.example.com` und `clip.mp4` aus dem Playlist-Verzeichnis würden
+auf denselben Cache-Slot fallen — die ausliefernden Server müssen
+daher die Invariante "gleicher Basename = gleicher Inhalt" einhalten.
+Wechsel des Hosts oder Pfads sind unkritisch, solange diese Invariante
+gilt.
+
+Percent-Encoding im Basename (`cl%C3%A4p.mp4` → `cläp.mp4`) wird beim
+Erzeugen des Cache-Filenames aufgelöst, sodass URL-encoded und direkt
+UTF-8 angegebene Einträge auf denselben Slot abbilden.
+
 ## Caching-Verhalten
 
 - **Cache-Ort**: Folien werden mit `slide_`-Prefix direkt im Knoten-
   Wurzelverzeichnis abgelegt (kein Subverzeichnis — info-beamer
   behandelt Subdirs als Child-Nodes und findet zur Laufzeit befüllte
   Dateien dort nicht zuverlässig).
-- **Download nur bei Bedarf**: Filenames sind content-adressiert; der
+- **Download nur bei Bedarf**: der Cache-Filename ist der Basename des
+  Playlist-Eintrags (s. *Playlist-Format und Adressierung*); der
   Service prüft vor jedem Download nur, ob die Datei existiert.
 - **Cache-GC**: nach jedem erfolgreichen Playlist-Fetch löscht der
   Service alle Files mit `slide_`-Prefix, die nicht mehr in der
@@ -437,7 +484,7 @@ Falls du auf einem Pi außerhalb der Hosted-Plattform testen willst:
 cat > config.json <<EOF
 {
     "playlist_url": "https://dein-server/slides/playlist.m3u8",
-    "folien_base_url": "https://dein-server/slides/",
+    "base_url": "",
     "allow_insecure_https": false,
     "poll_interval": 60,
     "retry_interval": 30,
