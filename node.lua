@@ -1020,8 +1020,13 @@ util.file_watch("config.json", function(raw)
     -- gepruften ist (Sidecar strippt im service vor Probe + IPC).
     -- Sonst wuerde audio_probe.url ~= audio_stream.url und der
     -- Reload-Gate dauerhaft blocken bei fuehrenden/trailing Spaces
-    -- im Setup-Eintrag.
-    audio_stream.url     = (cfg.audio_stream_url or ""):match("^%s*(.-)%s*$") or ""
+    -- im Setup-Eintrag. Type-Guard: bei manuell kaputter config.json
+    -- (Wert kein String) zurueckfallen auf "" statt :match auf einem
+    -- Nicht-String aufzurufen, was den file_watch-Callback abbrechen
+    -- wuerde.
+    local stream_url = cfg.audio_stream_url
+    if type(stream_url) ~= "string" then stream_url = "" end
+    audio_stream.url     = stream_url:match("^%s*(.-)%s*$") or ""
     audio_stream.volume  = db_to_linear(tonumber(cfg.audio_stream_volume_db))
 
     -- Jukebox-Playlist parsen. Reihenfolge im Setup ist Reihenfolge
