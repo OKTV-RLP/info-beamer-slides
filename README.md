@@ -67,6 +67,9 @@ node.lua       ← Renderer:
 - Optionale Jukebox: lokal hochgeladene Audio-Dateien werden als
   Endlos-Playlist (sequenziell oder zufällig) abgespielt — kein
   Netzwerk-Bedarf, läuft auch offline.
+- Optionales Audio-Ducking: Stream/Jukebox werden während der
+  Wiedergabe einer Vordergrund-Video-Folie um einen konfigurierbaren
+  dB-Wert abgesenkt, mit weicher Pegel-Rampe.
 
 ## Installation
 
@@ -151,6 +154,13 @@ node.lua       ← Renderer:
 | Jukebox-Playlist | leer | Liste von Audio-Resources (MP3/AAC), wird in Reihenfolge abgespielt. Neue Einträge sind mit `idle.mp3` (CC0, Brandon Morris, im Package gebündelt) vorbelegt |
 | Zufällige Reihenfolge | false | Beim Start und nach jedem kompletten Durchlauf neu mischen |
 | Lautstärke | 0 dB | dB-Pegel (gleiche Skala wie Stream) |
+
+### Audio-Ducking
+
+| Option | Default | Beschreibung |
+|---|---|---|
+| Ducking-Absenkung | 0 dB | Pegelabsenkung während FG-Video; 0 = aus, –12 dB ≈ ¼ Lautstärke, ≤ –60 dB stumm |
+| Ducking-Übergang | 0.25 s | Ramp-Dauer für Ein-/Ausblenden des Duckings |
 
 ## HTTP/HTTPS und self-signed-Zertifikate
 
@@ -312,6 +322,33 @@ der Hardware. Da nur lokale Files gelesen werden, ist
 `runtime.outside_sources` für die Jukebox nicht nötig (für den Stream
 ist es bereits gesetzt).
 
+## Audio-Ducking
+
+Während eine Vordergrund-Video-Folie spielt, kann die laufende
+Hintergrundmusik (Stream oder Jukebox) automatisch um einen
+konfigurierbaren dB-Wert abgesenkt werden, damit die Tonspur des Videos
+hörbar bleibt. Default `0 dB` lässt das Feature inaktiv — typische
+Werte sind `–10` bis `–18 dB`.
+
+**Wirkung:** Die Absenkung gilt **additiv** zum jeweils eingestellten
+Basispegel der Quelle. Beispiel: Stream-Lautstärke `–6 dB`, Ducking
+`–12 dB` → effektiv `–18 dB` während FG-Video läuft.
+
+**Übergang:** Linearer dB-Fade über *Ducking-Übergang* Sekunden
+(Default 0.25 s). 0 = harter Sprung. 0.15–0.30 s wirken natürlich;
+höhere Werte überlappen länger mit dem Video-Audio, niedrigere klingen
+abrupt.
+
+**Trigger:** Der Fade startet im selben Frame, in dem die Video-Folie
+geladen wird (also synchron zum visuellen Wechsel auf den FG-Video-
+Layer); der Fade-Up beginnt beim Verlassen der Video-Folie.
+
+**Geltungsbereich:** Wirkt nur auf Stream und Jukebox. Hintergrund-
+Video-Audio entfällt während einer FG-Video-Folie ohnehin (BG-Video
+wird via `background_yield()` für den Decoder-Slot disposed); Backup-
+Video-Audio existiert nur im IDLE-Zustand und ist von einer
+laufenden FG-Video-Folie definitionsgemäß nicht betroffen.
+
 ## Audio-Routing-Prioritäten
 
 Audio kommt von genau einer Quelle gleichzeitig. Priorität:
@@ -410,7 +447,9 @@ cat > config.json <<EOF
     "audio_jukebox_enabled": false,
     "audio_jukebox_playlist": [],
     "audio_jukebox_shuffle": false,
-    "audio_jukebox_volume_db": 0
+    "audio_jukebox_volume_db": 0,
+    "audio_ducking_db": 0,
+    "audio_ducking_fade": 0.25
 }
 EOF
 
