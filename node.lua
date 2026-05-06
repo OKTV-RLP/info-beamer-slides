@@ -157,10 +157,12 @@ local pending_image_hold_res = nil  -- Image-Resource, die im Frame nach
                                     -- Image->Video-Wechsel noch einmal
                                     -- gezeichnet wird (kompensiert den
                                     -- 1-Frame-Lag des BG-Dispose).
-local bg_resume_gate         = nil  -- {deadline}. Solange gesetzt:
-                                    -- Image-Pfad zeichnet nichts auf
-                                    -- die GL-Surface, bis das resumte
-                                    -- BG-Video state=="playing" liefert.
+local bg_resume_gate         = nil  -- {deadline,last_tick}. Solange
+                                    -- gesetzt: Image-Pfad zeichnet die
+                                    -- Folie nicht (Time-Overlay und
+                                    -- Cornerlogo laufen weiter), bis
+                                    -- das resumte BG-Video state==
+                                    -- "playing" liefert.
 local BG_RESUME_GATE_TIMEOUT = 0.5  -- Sicherheits-Fallback (Sek.) gegen
                                     -- kaputtes BG-Video, das nie
                                     -- "playing" erreicht.
@@ -1454,6 +1456,20 @@ function node.render()
     -- schon. Bei Video-BG ist background_slot via background_yield()
     -- ohnehin disposed, dann ist der Aufruf eh ein No-op.
 
+    -- Slide-Timing waehrend bg_resume_gate aktiv ist einfrieren:
+    -- slide_started kontinuierlich nachschieben, sodass elapsed konstant
+    -- bleibt. Ohne diese Pause wuerde die effektive Sichtbarkeitsdauer
+    -- (und ggf. der Out-Fade) der wartenden Image-Folie um bis zu
+    -- BG_RESUME_GATE_TIMEOUT verkuerzt — die Folie ist im Gate-Fenster
+    -- nicht sichtbar, soll aber ihre volle Standzeit bekommen, sobald
+    -- das BG-Video Frames liefert.
+    if bg_resume_gate then
+        if bg_resume_gate.last_tick then
+            slide_started = slide_started + (t - bg_resume_gate.last_tick)
+        end
+        bg_resume_gate.last_tick = t
+    end
+
     local fade_dur = math.max(0, CONFIG.fade_duration)
     local elapsed  = t - slide_started
 
@@ -1515,7 +1531,7 @@ function node.render()
             -- Nur bei Video-BG: Image-BG hat keinen Compositor-Lag
             -- (verschwindet synchron mit der GL-Surface via clear), das
             -- Hold waere dort unnoetig und koennte ein bereits
-            -- placeables FG-Video 1 Frame verdecken. Pruefung muss VOR
+            -- placeable FG-Video 1 Frame verdecken. Pruefung muss VOR
             -- background_yield() laufen, weil yield() background_slot
             -- auf nil setzt. Resource lebt bis zum Render weiter — bei
             -- Cycle-Wrap sorgt set_outgoing/swap_slides dafuer, dass
@@ -1535,7 +1551,10 @@ function node.render()
             -- erst gezeichnet wird, wenn das BG-Video sein erstes Frame
             -- liefert. Bei Image-BG (kein Reload) ist nichts zu warten.
             if background_slot.kind == "video" and background_slot.res then
-                bg_resume_gate = { deadline = t + BG_RESUME_GATE_TIMEOUT }
+                bg_resume_gate = {
+                    deadline  = t + BG_RESUME_GATE_TIMEOUT,
+                    last_tick = t,
+                }
             end
         end
         last_cur = cur
@@ -1589,9 +1608,10 @@ function node.render()
 
         -- Image-Pfad. Crossfade nur Image↔Image — Outgoing oder Nachfolger
         -- als Video → Hard-Cut (kein Shader-Sample auf raw-Videos
-        -- moeglich). Bei aktivem bg_resume_gate bleibt die GL-Surface
-        -- transparent, sodass FG-Folie und BG-Video gemeinsam erscheinen,
-        -- statt das Image vor dem BG-Pop zu zeigen.
+        -- moeglich). Bei aktivem bg_resume_gate wird die Folie nicht
+        -- gezeichnet (Time-Overlay und Cornerlogo laufen weiter), sodass
+        -- FG-Folie und BG-Video gemeinsam erscheinen statt das Image vor
+        -- dem BG-Pop zu zeigen.
         if not bg_resume_gate then
             local slide_drawn = false
             if outgoing then
