@@ -98,21 +98,29 @@ def get_https_verify(cfg):
 
 def basename_from_entry(entry):
     # Basename = letzter Pfad-Segmentteil ohne Query-/Fragment-Anteil.
-    # Bei vollstaendigen URLs (http://, https://) wird via urlsplit der
-    # Path extrahiert, damit ?token=... nicht im Cache-Filename landet
-    # und zwei URLs mit identischem Asset aber unterschiedlicher Query
-    # auf denselben Cache-Slot fallen. Bei reinen Pfaden/Dateinamen
-    # passiert string-mechanisch dasselbe.
-    if "://" in entry:
-        path = urlsplit(entry).path
-    else:
-        path = entry
+    # urlsplit funktioniert fuer alle Eintragsformen — auch fuer reine
+    # Pfade ("foo.png?v=2") und server-absolute Pfade ("/abs/foo.png")
+    # — und schneidet Query/Fragment dabei zuverlaessig ab. Damit
+    # fallen "foo.png?v=2" und "foo.png?v=3" auf denselben Cache-Slot
+    # (Cache-Invariante: Basename = Content-Identitaet).
+    path = urlsplit(entry).path
     name = path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
     # Percent-Encoding (z. B. "%C3%A4" -> "ä") aufloesen, damit der
     # lokale Cache-Filename in der gleichen Form vorliegt wie ein
     # direkt UTF-8 angegebener Eintrag — sonst wuerden gleicher
     # Inhalt unter zwei Encodings doppelt gecached.
-    return unquote(name)
+    #
+    # Py2-Detail: urllib.unquote ist Byte-orientiert. Auf einem
+    # unicode-Input behandelt es jedes "%XX" als einzelnes Code-
+    # Point — das wuerde aus "%C3%A4" ein u"\xc3\xa4" (= "Ã¤")
+    # machen statt des korrekten u"\xe4" (= "ä"). Korrekt: erst zu
+    # UTF-8-bytes encoden, percent-decoden, dann wieder als UTF-8
+    # decoden. Bei Latin-1-percent-Encoding (selten in M3U) faengt
+    # errors="replace" das einzelne Byte mit U+FFFD ab, ohne
+    # den Service-Loop zu killen.
+    if isinstance(name, unicode):
+        return unquote(name.encode("utf-8")).decode("utf-8", errors="replace")
+    return unquote(name).decode("utf-8", errors="replace")
 
 
 def parse_playlist(text, default_dur):
