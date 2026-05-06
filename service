@@ -119,8 +119,20 @@ def basename_from_entry(entry):
     # errors="replace" das einzelne Byte mit U+FFFD ab, ohne
     # den Service-Loop zu killen.
     if isinstance(name, unicode):
-        return unquote(name.encode("utf-8")).decode("utf-8", errors="replace")
-    return unquote(name).decode("utf-8", errors="replace")
+        name = unquote(name.encode("utf-8")).decode("utf-8", errors="replace")
+    else:
+        name = unquote(name).decode("utf-8", errors="replace")
+    # Sanitize post-unquote: percent-encoded Path-Separatoren ("%2F" ->
+    # "/", "%5C" -> "\") oder NUL-Bytes ("%00") koennten den lokalen
+    # Cache-Filename in einen Pfad mit Subdir-Anteil oder ein Filesystem-
+    # unfreundliches Token verwandeln (Path-Traversal-Risiko: ein
+    # Eintrag wie "..%2F..%2Fnode.lua" wuerde sonst zu "../../node.lua"
+    # decoden). Nochmaliges rsplit ueber beide Separatoren plus NUL-
+    # Strip stellt sicher, dass am Ende eine einzelne Filename-Komponente
+    # bleibt.
+    name = name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    name = name.replace("\x00", "")
+    return name
 
 
 def parse_playlist(text, default_dur):
@@ -493,15 +505,21 @@ def main():
             #   leer       -> urljoin(playlist_url, "./") -> Playlist-Dir
             #   relativ    -> urljoin(playlist_url, base_url) -> aufgeloest gegen Playlist-Dir
             #   absolut    -> urljoin(playlist_url, base_url) -> base_url (urljoin erkennt http/https)
-            # Trailing "/" auf relative Werte forcieren, damit das
-            # nachfolgende urljoin gegen Eintraege als Verzeichnis
-            # behandelt wird ("subdir" wuerde sonst durch das
-            # naechste urljoin ueberschrieben statt darunter
-            # gehaengt).
-            if cfg_base_url and "://" not in cfg_base_url \
-                    and not cfg_base_url.endswith("/"):
-                cfg_base_url += "/"
+            #
+            # Trailing-"/"-Normalisierung: ohne abschliessenden Slash
+            # behandelt urljoin den Wert als Datei und urljoin gegen
+            # einen Eintrag wuerde den letzten Pfadteil verwerfen
+            # ("https://cdn/v" + "clip.mp4" = "https://cdn/clip.mp4",
+            # "/v" geht verloren). Wir forcen "/" am Ende — egal ob
+            # relativ oder absolut. Eintraege mit Query/Fragment lassen
+            # wir aber in Ruhe: das sieht nach einer absichtlich
+            # angegebenen Datei-URL aus, die wir nicht uminterpretieren
+            # sollten.
             if cfg_base_url:
+                _parts = urlsplit(cfg_base_url)
+                if not _parts.query and not _parts.fragment \
+                        and not cfg_base_url.endswith("/"):
+                    cfg_base_url += "/"
                 base_url = urljoin(playlist_url, cfg_base_url)
             else:
                 base_url = urljoin(playlist_url, "./")
