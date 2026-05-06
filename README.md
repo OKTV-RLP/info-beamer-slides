@@ -41,8 +41,12 @@ node.lua       ← Renderer:
 - Der Renderer wendet ein neues Manifest am **Ende des aktuellen
   Zyklus** an, mit Crossfade von der letzten Folie der alten Liste
   zur ersten Folie der neuen.
-- Folien-Filenames sind content-adressiert; der Cache prüft daher nur
-  auf Existenz, kein Hash-Vergleich, keine Re-Downloads.
+- Cache-Identität ist der Basename des Playlist-Eintrags (gleicher
+  Basename ⇒ gleicher Inhalt, vom Server zugesichert); der Cache prüft
+  daher nur auf Existenz, kein Hash-Vergleich, keine Re-Downloads.
+  Vollständige URLs, relative Unterverzeichnisse und reine Dateinamen
+  in der Playlist sind alle erlaubt — siehe *Playlist-Format und
+  Adressierung*.
 - Zeit-Overlay-Updates gehen per UDP an `127.0.0.1:4444` — keine
   SD-Schreibzyklen, sub-Sekunden-Latenz Service → Renderer.
 
@@ -393,13 +397,38 @@ Sekunde):
 - Für Video-Loops: Raspberry Pi 4 oder neuer.
 - Für Audio-Stream: Pi-Build mit `sys.provides("audio")`.
 
+## Playlist-Format und Adressierung
+
+Die M3U/M3U8-Playlist kann pro Eintrag drei Schreibweisen enthalten:
+
+| Schreibweise | Beispiel | Download-URL |
+|---|---|---|
+| Reiner Dateiname | `clip.mp4` | `<folien_base_url>/clip.mp4` |
+| Relativer Pfad | `videos/clip.mp4` | `<folien_base_url>/videos/clip.mp4` |
+| Vollständige URL | `https://cdn.example.com/v/clip.mp4` | wird so wie angegeben gezogen |
+
+Server-absolute Pfade (`/abs/clip.mp4`) werden gegen die Host-Wurzel der
+`folien_base_url` aufgelöst. Query-Strings und Fragmente in URLs werden
+beim Download mitgesendet, fließen aber nicht in den Cache-Filename ein.
+
+**Cache-Identität ist immer der Basename**: `clip.mp4` aus `cdn.example.com`
+und `clip.mp4` aus `<folien_base_url>` würden auf denselben Cache-Slot
+fallen — die ausliefernden Server müssen daher die Invariante "gleicher
+Basename = gleicher Inhalt" einhalten. Wechsel des Hosts oder Pfads sind
+unkritisch, solange diese Invariante gilt.
+
+Percent-Encoding im Basename (`cl%C3%A4p.mp4` → `cläp.mp4`) wird beim
+Erzeugen des Cache-Filenames aufgelöst, sodass URL-encoded und direkt
+UTF-8 angegebene Einträge auf denselben Slot abbilden.
+
 ## Caching-Verhalten
 
 - **Cache-Ort**: Folien werden mit `slide_`-Prefix direkt im Knoten-
   Wurzelverzeichnis abgelegt (kein Subverzeichnis — info-beamer
   behandelt Subdirs als Child-Nodes und findet zur Laufzeit befüllte
   Dateien dort nicht zuverlässig).
-- **Download nur bei Bedarf**: Filenames sind content-adressiert; der
+- **Download nur bei Bedarf**: der Cache-Filename ist der Basename des
+  Playlist-Eintrags (s. *Playlist-Format und Adressierung*); der
   Service prüft vor jedem Download nur, ob die Datei existiert.
 - **Cache-GC**: nach jedem erfolgreichen Playlist-Fetch löscht der
   Service alle Files mit `slide_`-Prefix, die nicht mehr in der

@@ -29,6 +29,10 @@ import hashlib
 import traceback
 import datetime
 
+# Python-2-Importpfade — der Sidecar-Shebang oben ist /usr/bin/python2.7.
+from urlparse import urlsplit, urljoin
+from urllib   import unquote
+
 import requests
 import urllib3
 import pytz
@@ -92,10 +96,40 @@ def get_https_verify(cfg):
     return verify
 
 
+def basename_from_entry(entry):
+    # Basename = letzter Pfad-Segmentteil ohne Query-/Fragment-Anteil.
+    # Bei vollstaendigen URLs (http://, https://) wird via urlsplit der
+    # Path extrahiert, damit ?token=... nicht im Cache-Filename landet
+    # und zwei URLs mit identischem Asset aber unterschiedlicher Query
+    # auf denselben Cache-Slot fallen. Bei reinen Pfaden/Dateinamen
+    # passiert string-mechanisch dasselbe.
+    if "://" in entry:
+        path = urlsplit(entry).path
+    else:
+        path = entry
+    name = path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    # Percent-Encoding (z. B. "%C3%A4" -> "ä") aufloesen, damit der
+    # lokale Cache-Filename in der gleichen Form vorliegt wie ein
+    # direkt UTF-8 angegebener Eintrag — sonst wuerden gleicher
+    # Inhalt unter zwei Encodings doppelt gecached.
+    return unquote(name)
+
+
 def parse_playlist(text, default_dur):
     # M3U und M3U8 sind syntaktisch identisch — der Unterschied liegt
     # nur im erwarteten Encoding (M3U: oft Latin-1/Win-1252; M3U8:
     # UTF-8). Encoding-Behandlung passiert im Caller via r.encoding.
+    #
+    # Eintraege koennen sein:
+    #   * reiner Dateiname           "clip.mp4"
+    #   * relativer Pfad             "videos/clip.mp4"
+    #   * vollstaendige URL          "https://cdn.example.com/clip.mp4"
+    # In allen Faellen ist der Basename die kanonische Cache-/Content-
+    # Identitaet (siehe basename_from_entry); der Original-Eintrag wird
+    # zusaetzlich als "url" gefuehrt und erst beim Download via
+    # urljoin gegen folien_base_url aufgeloest. Voraussetzung: der
+    # Inhaltslieferant garantiert "gleicher Basename = gleicher Inhalt"
+    # (aufrufende Server enforcen das).
     entries = []
     duration = default_dur
     for line in text.splitlines():
@@ -106,11 +140,13 @@ def parse_playlist(text, default_dur):
             except Exception:
                 pass
         elif line and not line.startswith("#"):
-            # Nur Dateiname, falls die Playlist absolute oder relative
-            # Pfade enthaelt.
-            name = line.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+            name = basename_from_entry(line)
             if name:
-                entries.append({"name": name, "duration": duration})
+                entries.append({
+                    "name":     name,
+                    "url":      line,
+                    "duration": duration,
+                })
             duration = default_dur
     return entries
 
@@ -492,11 +528,18 @@ def main():
                 if os.path.exists(local):
                     continue
                 sleep_with_time_ticks(0)
+                # urljoin loest den Eintrag gegen die Folien-Basis-URL auf:
+                #   * absolute URL (http://, https://) -> bleibt unveraendert
+                #   * server-absoluter Pfad ("/x.mp4") -> base_url-Host + Pfad
+                #   * relativer Pfad/Filename          -> base_url + entry
+                # Damit funktionieren reine Filenames, Unterverzeichnisse
+                # und vollstaendige Fremd-Server-URLs gleichermassen.
+                download_url = urljoin(base_url, entry["url"])
                 try:
-                    download_to(base_url + entry["name"], local, verify, 30)
+                    download_to(download_url, local, verify, 30)
                 except Exception as e:
-                    log("Folie-Download fehlgeschlagen %s: %s" %
-                        (entry["name"], e))
+                    log("Folie-Download fehlgeschlagen %s (%s): %s" %
+                        (entry["name"], download_url, e))
 
             # Cache aufraeumen: entferne nur Files mit unserem Praefix,
             # die nicht mehr in der aktuellen Playlist sind, sowie
