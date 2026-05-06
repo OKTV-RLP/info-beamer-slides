@@ -197,6 +197,22 @@ es sich mit anderen Layern mischen lässt. Das setzt **Raspberry Pi 4
 oder neuer** voraus. Auf Pi 3 schlägt der Load fehl, der Player loggt
 eine Warnung und arbeitet ohne den betroffenen Slot weiter.
 
+## Single-Video-Playlist
+
+Enthält die Playlist genau einen Eintrag und der ist ein Video, wird
+es mit `looped = true` geladen — der Decoder loopt frame-genau ohne
+Dispose-/Reload-Lücke. Die Tonspur loopt analog gapless. Sobald der
+Sidecar eine neue Playlist liefert, wird der Loop einmalig gebrochen
+und mit `swap_slides` auf die neue Liste umgestiegen.
+
+Bei mehr als einem Eintrag (auch wenn das einzige zusätzliche Asset
+ein Bild oder ein zweiter Video-Clip ist) wird das Video wie üblich
+mit `looped = false` geladen, damit der `finished`-Übergang das
+Advance auf die nächste Folie auslösen kann.
+
+Single-Image-Playlists werden ohnehin statisch dargestellt — der
+Cycle-Wrap zeichnet die gleiche Bildressource weiter, ohne Reload.
+
 ## Zeit-Overlay
 
 Optionale Live-Uhr, gerendert über den Folien (im Backup-Zustand

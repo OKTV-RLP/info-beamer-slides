@@ -45,6 +45,13 @@
 --   * Video-Folie (PLAYING): FG-Audio mischt sich mit der bisherigen
 --     Quelle (Stream/Jukebox); BG-Audio entfaellt, weil BG fuer den
 --     Decoder-Slot weichen muss.
+--
+-- Single-Video-Playlist (#slides == 1, einziger Slot ist Video): das
+-- Video wird mit looped=true geladen — Decoder-internes nahtloses
+-- Looping, frame-genau, ohne Dispose+Reload-Luecke. Das bleibt fuer
+-- die gesamte Standzeit der Playlist so, bis ein Manifest-Update
+-- ueber den Sidecar eine neue Liste liefert (force-Advance via
+-- pending_slides bricht den Loop fuer den swap_slides-Pfad).
 
 gl.setup(NATIVE_WIDTH, NATIVE_HEIGHT)
 
@@ -1049,11 +1056,17 @@ end
 -- (= Slide-Wechsel auf direkt aufeinanderfolgenden gleichen Video-
 -- Dateinamen), wollen wir die Wiedergabe zurueckspulen, nicht beim
 -- "finished"-State haengen bleiben.
-local function fg_video_load(slide)
+--
+-- looped: bei Single-Video-Playlists (#slides == 1, einziger Slot
+-- ist Video) lassen wir den Decoder selbst loopen — frame-genau,
+-- ohne :dispose()+Reload-Luecke. Mehr-Slide-Playlists muessen
+-- dagegen mit looped=false laden, damit state=="finished" das
+-- Advance auf die naechste Folie ausloesen kann.
+local function fg_video_load(slide, looped)
     fg_video_unload()
     local ok, r = pcall(resource.load_video, {
         file   = slide.file,
-        looped = false,
+        looped = looped and true or false,
         raw    = true,
         audio  = true,
         paused = true,
@@ -1589,6 +1602,19 @@ function node.render()
         if fg_video.res then
             local ok, st = pcall(function() return fg_video.res:state() end)
             should_advance = ok and (st == "finished" or st == "error")
+            -- Bei looped=true (Single-Video-Playlist, #slides == 1)
+            -- erreicht state() nie "finished" — der Cycle-Wrap waere
+            -- damit blockiert und ein anliegendes pending_slides
+            -- (Manifest-Update aus dem Sidecar) wuerde nie angewandt.
+            -- In genau dem Moment erzwingen wir den Advance, damit der
+            -- Wrap-Pfad swap_slides aufrufen und auf die neue Liste
+            -- umsteigen kann. Auf Multi-Slide-Playlists darf das nicht
+            -- greifen — dort laufen Videos bestimmungsgemaess bis
+            -- "finished" und ein Manifest-Update wartet auf das
+            -- regulaere Cycle-Ende.
+            if not should_advance and pending_slides and #slides == 1 then
+                should_advance = true
+            end
         else
             -- Load fehlgeschlagen oder noch nicht erfolgt; ueberspringen,
             -- aber nur wenn der Slide-Wechsel-Hook bereits gelaufen ist
@@ -1655,10 +1681,26 @@ function node.render()
                 pending_image_hold_res = last_cur.res
             end
             background_yield()
-            if not fg_video_load(cur) then
+            -- Single-Video-Playlist (#slides == 1, Slot ist Video):
+            -- decoder-internes Looping aktivieren. fg_video.res bleibt
+            -- damit dauerhaft auf der "playing"-Resource liegen,
+            -- state() liefert nie "finished", und der Advance-Pfad
+            -- darunter wird einmalig durch pending_slides gebrochen
+            -- (s. should_advance fuer Video).
+            local single_video_loop =
+                #slides == 1 and slides[1].kind == "video"
+            if not fg_video_load(cur, single_video_loop) then
                 background_resume()
             end
-        elseif last_cur and last_cur.kind == "video" then
+        elseif fg_video.res or bg_yielded_state then
+            -- Cleanup auf den tatsaechlichen Decoder-Zustand stuetzen,
+            -- nicht auf last_cur: der Force-Advance fuer Single-Video-
+            -- Loops (s. should_advance fuer Video) setzt last_cur=nil,
+            -- damit der Hook nach dem Wrap auf demselben Lua-Pointer
+            -- noch einmal feuert. Wenn die neue Playlist mit einem
+            -- Image-Slide startet, wuerde 'last_cur and last_cur.kind
+            -- == "video"' nicht mehr greifen — fg_video bliebe geladen
+            -- (Decoder-Slot belegt, Frame-Strom auf Layer -1 sichtbar).
             fg_video_unload()
             background_resume()
             -- Video->Image+BG-Video: Gate setzen, damit die Image-Folie
