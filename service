@@ -219,8 +219,17 @@ _audio_probe_state = {
 }
 
 
-def push_audio_probe(result):
-    payload = b"root/audio_probe:" + result.encode("ascii")
+def push_audio_probe(result, url):
+    # Format: "ok:<url>" oder "fail:<url>". Lua matcht die URL gegen
+    # audio_stream.url, damit ein frisches Probe-Resultat fuer eine
+    # alte URL nicht versehentlich auf eine zwischenzeitlich
+    # geaenderte URL angewendet wird (Race-Schutz bei Setup-Aenderung
+    # im stale_after-Fenster). URL wird roh (Konfig-Form) gesendet
+    # — Lua's audio_stream.url ist ebenfalls roh, sanitize_url wird
+    # erst beim load_audio angewendet.
+    payload = (b"root/audio_probe:"
+               + result.encode("ascii") + b":"
+               + url.encode("utf-8"))
     try:
         _ipc_sock.sendto(payload, (IB_HOST, IB_PORT))
     except Exception as e:
@@ -297,7 +306,7 @@ def maybe_probe_audio_stream(cfg):
 
     verify = not bool(cfg.get("allow_insecure_https"))
     result = probe_audio_url(url, verify)
-    push_audio_probe(result)
+    push_audio_probe(result, url)
 
     _audio_probe_state["last_url"] = url
     interval = _PROBE_INTERVAL_OK if result == "ok" else _PROBE_INTERVAL_FAIL
@@ -423,7 +432,18 @@ def main():
             # Fehlende Folien herunterladen. Filenames sind content-
             # adressiert (gleicher Name == gleicher Inhalt), daher reicht
             # eine Existenzpruefung im Cache.
+            #
+            # Zwischen den Downloads loest sleep_with_time_ticks(0) einen
+            # Zeit- und Audio-Probe-Tick aus, damit der Renderer auch
+            # waehrend laengerer Download-Phasen frische Heartbeats
+            # bekommt — sonst wuerde die Audio-Probe Lua-seitig stale
+            # (>stale_after, derzeit 60 s) und Reload pausiert unnoetig.
+            # Worst Case: ein einzelner Download blockiert bis 30 s —
+            # innerhalb dieses Fensters laeuft kein Tick, aber der
+            # Renderer erholt sich automatisch beim naechsten Tick
+            # zwischen den Downloads.
             for entry in entries:
+                sleep_with_time_ticks(0)
                 local = slide_filename(entry["name"])
                 if os.path.exists(local):
                     continue

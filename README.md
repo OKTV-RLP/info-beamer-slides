@@ -259,13 +259,20 @@ Decoder-State (`error`/`finished`) und versucht nach 5 s eine
 Neuverbindung. Kein dynamischer Audio-Fallback auf Hintergrund-Video.
 
 **Crash-Schutz (Sidecar-Probe):** Der `service`-Sidecar fragt die
-Stream-URL alle 3–5 s mit einem Range-GET ab und meldet `ok` /
-`fail` per UDP-IPC an den Renderer. `resource.load_audio` wird nur
-ausgeführt, wenn die letzte Probe `ok` und nicht älter als 30 s
-ist. Hintergrund: in info-beamer hosted (stable-0016) gibt es
-einen reproduzierbaren SIGSEGV im Audio-Worker, sobald
+Stream-URL per Range-GET ab und meldet das Ergebnis (`ok` / `fail`)
+zusammen mit der gepruften URL per UDP-IPC an den Renderer. Probe-
+Takt nominal 3–5 s (`ok`-Fall 5 s, `fail`-Fall 3 s); zwischen den
+Folien-Downloads wird zusätzlich getickt, sodass der Heartbeat
+auch unter Last meist regelmäßig kommt. Best-effort: solange ein
+einzelner Folien-Download laeuft (Timeout bis 30 s), pausiert der
+Heartbeat. Lua akzeptiert eine Probe als gültig, wenn sie nicht
+älter als 60 s ist und die mitgesendete URL der aktuell konfigurierten
+entspricht — `resource.load_audio` läuft nur dann.
+
+Hintergrund: in info-beamer hosted (stable-0016) gibt es einen
+reproduzierbaren SIGSEGV im Audio-Worker, sobald
 `resource.load_audio` mit einer URL aufgerufen wird, die der
-Server gerade nicht bedient (404, DNS-Fehler, Conn-Refused,
+Server gerade nicht bedient (4xx/5xx, DNS-Fehler, Conn-Refused,
 Timeout). Der Crash nimmt den ganzen Prozess mit, der Watchdog
 startet neu, und solange die URL kaputt bleibt, entsteht eine
 Restart-Schleife im Sekundentakt — Bildschirm permanent schwarz,

@@ -176,15 +176,25 @@ local audio_stream = {
 -- gesamten Knoten samt Watchdog im Sekundentakt mit. Aus Lua
 -- nicht abfangbar (Crash im nativen Worker-Thread).
 --
--- stale_after: laeuft die Probe aus (Sidecar tot/haengt), bleibt
--- ok zwar auf seinem letzten Wert stehen, aber der Reload-Gate
--- prueft zusaetzlich auf Frische via (now - last_msg_at) und
--- blockt bei stale Probe — sicherer Default. Lieber stumm als
--- Crash-Loop.
+-- url: die URL, fuer die das letzte Probe-Resultat galt (vom
+-- Sidecar im IPC-Payload mitgesendet). Reload-Gate akzeptiert ein
+-- "ok" nur, wenn diese URL == audio_stream.url — andernfalls
+-- koennte ein frisches "ok" der alten Konfig-URL versehentlich
+-- den Load einer gerade geaenderten neuen URL freischalten,
+-- bevor der Sidecar sie ueberhaupt geprobt hat.
+--
+-- stale_after = 60 s: laeuft die Probe aus (Sidecar tot/haengt
+-- oder steckt in einem langen Folien-Download), prueft der
+-- Reload-Gate via (now - last_msg_at) und blockt — sicherer
+-- Default. Lieber stumm als Crash-Loop. Wert groesser als der
+-- single-Download-Timeout im Sidecar (30 s) gewaehlt, damit ein
+-- einzelner langer Download zwischen den Probe-Ticks die Probe
+-- nicht knapp ueber die Schwelle drueckt.
 local audio_probe = {
     ok           = nil,
+    url          = nil,
     last_msg_at  = -math.huge,
-    stale_after  = 30,
+    stale_after  = 60,
 }
 
 -- Optionale Jukebox: lokal gespeicherte Audio-Files (per Setup als
@@ -579,15 +589,18 @@ local function check_audio_stream_health()
     -- (Re)load nach Cooldown — nur wenn der Sidecar-Probe die URL
     -- gerade als erreichbar bestaetigt. Verhindert SIGSEGV im
     -- Audio-Worker bei kaputten URLs (Details s. audio_probe).
-    -- Probe muss frisch sein (stale_after-Fenster), sonst gilt der
-    -- letzte Wert als unsicher und wir blocken konservativ.
+    -- Probe muss frisch sein (stale_after-Fenster) UND fuer die
+    -- aktuell konfigurierte URL gelten — sonst koennte ein frisches
+    -- "ok" der alten URL versehentlich den Load einer gerade
+    -- geaenderten neuen URL freischalten.
     -- Bei fehlgeschlagener Probe wird kein last_attempt gesetzt —
     -- sobald die Probe wieder ok wird, soll im selben Frame
     -- geladen werden (kein zusaetzlicher retry_after-Cooldown).
     if not audio_stream.res
        and sys.now() - audio_stream.last_attempt >= audio_stream.retry_after then
         local probe_fresh = sys.now() - audio_probe.last_msg_at < audio_probe.stale_after
-        if probe_fresh and audio_probe.ok == true then
+        local probe_matches = audio_probe.url == audio_stream.url
+        if probe_fresh and probe_matches and audio_probe.ok == true then
             load_audio_stream()
         end
     end
@@ -1127,12 +1140,19 @@ util.data_mapper{
     time = function(msg)
         time_overlay.text = msg or ""
     end,
-    -- Erreichbarkeits-Probe-Resultat vom Sidecar. Werte: "ok" |
-    -- "fail". Steuert den Reload-Gate in check_audio_stream_health
-    -- (Details s. audio_probe-Tabelle).
+    -- Erreichbarkeits-Probe-Resultat vom Sidecar. Format: "ok:<url>"
+    -- oder "fail:<url>". URL wird mitgesendet, damit der Reload-Gate
+    -- ein "ok" nur fuer die aktuell aktive Konfig-URL akzeptiert
+    -- (Race-Schutz, s. audio_probe-Tabelle). Defensiv gegen
+    -- unerwartete Formate: bei Parser-Fehler bleibt der Probe-State
+    -- unveraendert.
     audio_probe = function(msg)
+        msg = msg or ""
+        local result, url = msg:match("^([^:]+):(.*)$")
+        if not result then return end
         audio_probe.last_msg_at = sys.now()
-        audio_probe.ok = (msg == "ok")
+        audio_probe.ok = (result == "ok")
+        audio_probe.url = url
     end,
 }
 
