@@ -1692,7 +1692,15 @@ function node.render()
             if not fg_video_load(cur, single_video_loop) then
                 background_resume()
             end
-        elseif last_cur and last_cur.kind == "video" then
+        elseif fg_video.res or bg_yielded_state then
+            -- Cleanup auf den tatsaechlichen Decoder-Zustand stuetzen,
+            -- nicht auf last_cur: der Force-Advance fuer Single-Video-
+            -- Loops (s. should_advance fuer Video) setzt last_cur=nil,
+            -- damit der Hook nach dem Wrap auf demselben Lua-Pointer
+            -- noch einmal feuert. Wenn die neue Playlist mit einem
+            -- Image-Slide startet, wuerde 'last_cur and last_cur.kind
+            -- == "video"' nicht mehr greifen — fg_video bliebe geladen
+            -- (Decoder-Slot belegt, Frame-Strom auf Layer -1 sichtbar).
             fg_video_unload()
             background_resume()
             -- Video->Image+BG-Video: Gate setzen, damit die Image-Folie
