@@ -443,10 +443,16 @@ end
 -- Slot keinen halben Crossfade zeigen soll, sondern auf
 -- draw_fit(nil) -> reines BG zurueckfaellt. Wird bei Crossfade-
 -- Entscheidungen genutzt (Cycle-Fade can_fade, Out-Fade-Branch).
+--
+-- Reihenfolge: image_ready ZUERST aufrufen — der Aufruf kann
+-- slot.failed=true setzen und slot.res=nil disposen (state()=="error"-
+-- Branch). Wenn wir failed/res VOR image_ready pruefen, sehen wir
+-- den State VOR dem Uebergang und liefern faelschlich true; das
+-- wuerde draw_crossfade mit nil-Resource aufrufen.
 local function image_drawable(slot)
     if not slot or slot.kind ~= "image" then return false end
-    if slot.failed or not slot.res     then return false end
-    return image_ready(slot)
+    if not image_ready(slot) then return false end
+    return slot.res ~= nil and not slot.failed
 end
 
 -- Asynchron einen Image-Slot laden. Idempotent: wiederholte Aufrufe
