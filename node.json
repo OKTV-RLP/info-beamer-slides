@@ -20,7 +20,7 @@
             "name": "base_url",
             "type": "string",
             "default": "",
-            "hint": "Wurzel für relative Playlist-Einträge. Leer = Verzeichnis der Playlist-URL. Relativer Wert (z. B. 'videos/') wird gegen das Playlist-Verzeichnis aufgelöst. Vollständige URL (https://...) ersetzt das Playlist-Verzeichnis komplett. Vollständige URLs in der Playlist gelten immer absolut und ignorieren diesen Wert."
+            "hint": "Wurzel für relative Playlist-Einträge. Leer: Verzeichnis der Playlist-URL. Relativ (videos/): gegen Playlist-Verzeichnis aufgelöst. Vollständige URL (https://…): ersetzt Playlist-Verzeichnis. Vollständige URLs in Einträgen ignorieren diesen Wert."
         },
         {
             "title": "Self-signed-HTTPS akzeptieren",
