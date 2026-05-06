@@ -258,14 +258,20 @@ local audio_jukebox = {
 -- Ducking: senkt den Pegel der aktiven Hintergrund-Quelle (Stream/
 -- Jukebox) waehrend der Wiedergabe einer Vordergrund-Video-Folie um
 -- CONFIG.audio_ducking_db ab. Trigger ist fg_video.res ~= nil — kein
--- separater Hook in fg_video_load/unload noetig. current_db ist der
--- aktuell wirksame Offset (lineare dB-Rampe Richtung target_db ueber
--- CONFIG.audio_ducking_fade Sekunden); apply_audio_levels rechnet
--- ihn pro Frame fort und schreibt :volume(db_to_linear(base + offset))
--- auf die aktive Quelle.
+-- separater Hook in fg_video_load/unload noetig.
+--
+-- Rampen-Modell: factor ∈ [0, 1] interpoliert linear in der Zeit
+-- (1/fade pro Sekunde) zwischen 0 (kein Ducking) und 1 (volles
+-- Ducking). apply_audio_levels mischt daraus den Pegel als
+-- amplituden-lineare Interpolation zwischen base_lin und ducked_lin
+-- (beide ueber db_to_linear gerechnet) — d.h. der Linear-Faktor
+-- :volume() bewegt sich gleichmaessig, statt wie bei einer dB-
+-- linearen Rampe vorne aggressiv zu fallen und hinten ins Stumme
+-- zu trudeln. Wirkt insbesondere bei Fade-zu-(-60 dB) hoerbar
+-- gleichmaessiger.
 local audio_ducking = {
-    current_db = 0,
-    last_t     = nil,    -- sys.now() der letzten Rampen-Anwendung
+    factor = 0,
+    last_t = nil,    -- sys.now() der letzten Rampen-Anwendung
 }
 
 -- Math-RNG einmalig seeden, damit Shuffle nicht in jeder Session
@@ -860,9 +866,18 @@ local function update_audio_routing()
     audio_active = target
 end
 
--- Pegel-Anwendung pro Frame: berechnet die laufende Ducking-Rampe
--- (lineare dB-Bewegung Richtung target_db) und schreibt den
--- resultierenden Pegel auf die aktive Stream/Jukebox-Quelle.
+-- Pegel-Anwendung pro Frame: rampt audio_ducking.factor linear in
+-- der Zeit Richtung target_factor (1 = volles Ducking, 0 = kein
+-- Ducking) und schreibt den amplituden-linear gemischten Pegel auf
+-- die aktive Stream/Jukebox-Quelle.
+--
+-- Hoer-Begruendung fuer amplitude-linear statt dB-linear: dB-lineare
+-- Rampen klingen besonders bei Fade-zu-Stumm (-60 dB) ungleichmaessig,
+-- weil der lineare Amplituden-Verlauf exponentiell aussieht — die
+-- ersten 30-40 % der Rampe machen subjektiv 90 % der Pegel-Aenderung,
+-- der Rest trudelt unhoerbar aus. Linear in Amplitude verteilt die
+-- wahrnehmbare Bewegung gleichmaessig ueber die Fade-Dauer.
+--
 -- Backup-/BG-Video-Audio nutzen :start()/:stop()-Mute (siehe
 -- update_audio_routing) und sind hier nicht beteiligt — auf Pi 3B
 -- ist BG-Video waehrend FG ohnehin via background_yield() disposed,
@@ -872,12 +887,7 @@ local function apply_audio_levels()
     -- Ducking nur bei negativem Konfigurationswert wirksam — 0 (oder
     -- ungueltig) deaktiviert das Feature.
     local cfg_db = CONFIG.audio_ducking_db or 0
-    local target_db
-    if fg_video.res and cfg_db < 0 then
-        target_db = cfg_db
-    else
-        target_db = 0
-    end
+    local target_factor = (fg_video.res and cfg_db < 0) and 1 or 0
 
     local now_t = sys.now()
     local dt = (audio_ducking.last_t and (now_t - audio_ducking.last_t)) or 0
@@ -885,27 +895,35 @@ local function apply_audio_levels()
     audio_ducking.last_t = now_t
 
     local fade = CONFIG.audio_ducking_fade or 0
-    local span = math.abs(cfg_db)
-    if fade <= 0 or span <= 0 then
-        audio_ducking.current_db = target_db
-    elseif audio_ducking.current_db ~= target_db then
-        local rate = span / fade   -- dB pro Sekunde (volle Strecke / Rampe)
-        local diff = target_db - audio_ducking.current_db
+    if fade <= 0 then
+        audio_ducking.factor = target_factor
+    elseif audio_ducking.factor ~= target_factor then
+        local rate = 1 / fade   -- volle Strecke (0..1) in fade Sekunden
+        local diff = target_factor - audio_ducking.factor
         local step = rate * dt
         if math.abs(diff) <= step then
-            audio_ducking.current_db = target_db
+            audio_ducking.factor = target_factor
         elseif diff > 0 then
-            audio_ducking.current_db = audio_ducking.current_db + step
+            audio_ducking.factor = audio_ducking.factor + step
         else
-            audio_ducking.current_db = audio_ducking.current_db - step
+            audio_ducking.factor = audio_ducking.factor - step
         end
     end
 
+    -- Amplituden-Mix zwischen Basispegel und gedrueckter Endpegel.
+    -- Beide Endpunkte werden pro Frame neu aus volume_db + cfg_db
+    -- gerechnet, sodass Live-Aenderungen am Setup sofort greifen.
+    local function leveled(volume_db)
+        local base_lin   = db_to_linear(volume_db)
+        local ducked_lin = db_to_linear(volume_db + cfg_db)
+        return base_lin + (ducked_lin - base_lin) * audio_ducking.factor
+    end
+
     if audio_active == "stream" and audio_stream.res then
-        local lvl = db_to_linear(audio_stream.volume_db + audio_ducking.current_db)
+        local lvl = leveled(audio_stream.volume_db)
         pcall(function() audio_stream.res:volume(lvl) end)
     elseif audio_active == "jukebox" and audio_jukebox.res then
-        local lvl = db_to_linear(audio_jukebox.volume_db + audio_ducking.current_db)
+        local lvl = leveled(audio_jukebox.volume_db)
         pcall(function() audio_jukebox.res:volume(lvl) end)
     end
 end

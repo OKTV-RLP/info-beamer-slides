@@ -334,10 +334,12 @@ Werte sind `–10` bis `–18 dB`.
 Basispegel der Quelle. Beispiel: Stream-Lautstärke `–6 dB`, Ducking
 `–12 dB` → effektiv `–18 dB` während FG-Video läuft.
 
-**Übergang:** Linearer dB-Fade über *Ducking-Übergang* Sekunden
-(Default 0.25 s). 0 = harter Sprung. 0.15–0.30 s wirken natürlich;
-höhere Werte überlappen länger mit dem Video-Audio, niedrigere klingen
-abrupt.
+**Übergang:** Amplituden-linearer Fade über *Ducking-Übergang*
+Sekunden (Default 0.25 s). 0 = harter Sprung. Die Pegel-Bewegung
+verteilt sich gleichmäßig über die ganze Fade-Dauer, statt — wie
+bei einer dB-linearen Rampe — vorne aggressiv abzufallen und hinten
+unhörbar auszutrudeln. Insbesondere bei Fade-zu-Stumm (`-60 dB`)
+fühlt sich die Bewegung dadurch durchgängig an.
 
 **Trigger:** Der Fade startet im selben Frame, in dem die Video-Folie
 geladen wird (also synchron zum visuellen Wechsel auf den FG-Video-
