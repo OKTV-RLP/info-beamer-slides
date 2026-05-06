@@ -33,7 +33,7 @@
 -- Layer-Stack (negativ = hinter GL-Surface):
 --   -3: Hintergrund-Video (background_slot)
 --   -2: Backup-Video      (backup_slot)
---   -1: Foreground-Video  (fg_video, NEU — nur waehrend Video-Folien aktiv)
+--   -1: Foreground-Video  (fg_video, nur waehrend Video-Folien aktiv)
 --    0: GL-Surface mit Folien-Image, Cornerlogo, Zeit-Overlay
 -- Cornerlogo + Zeit liegen damit auch ueber laufenden Video-Folien.
 --
@@ -57,8 +57,10 @@ local json = require "json"
 ------------------------------------------------------------
 
 local CONFIG = {
-    fade_duration    = 0.5,
-    default_duration = 10,
+    fade_duration       = 0.5,
+    default_duration    = 10,
+    audio_ducking_db    = 0,     -- Absenkung waehrend FG-Video (<= 0)
+    audio_ducking_fade  = 0.25,  -- Rampe in Sekunden
 }
 
 -- Raw-Videos rendern in info-beamer auf einer eigenen Ebene außerhalb
@@ -174,12 +176,13 @@ local audio_active = nil
 -- Aktivierung verlangt zusätzlich
 -- runtime.outside_sources=true in package.json (für HTTP-URLs) und
 -- die "audio"-Capability auf der Hardware (sys.provides "audio").
--- Pegel wird zur Laufzeit per :volume(0..1) gesteuert. Watchdog disposed bei
--- state="error"/"finished" und reconnectet nach retry_after Sekunden.
+-- Pegel wird zur Laufzeit per :volume(0..1) gesteuert (Berechnung in
+-- apply_audio_levels: db_to_linear(volume_db + ducking-Offset)). Watchdog
+-- disposed bei state="error"/"finished" und reconnectet nach retry_after Sekunden.
 local audio_stream = {
     enabled      = false,
     url          = "",
-    volume       = 1.0,  -- 0.0 (stumm) bis 1.0 (voll)
+    volume_db    = 0,    -- Basispegel in dB (0 = unity, <= -60 = stumm)
     res          = nil,
     loaded_url   = nil,
     last_attempt = -math.huge,
@@ -236,7 +239,7 @@ local audio_probe = {
 local audio_jukebox = {
     enabled       = false,
     shuffle       = false,
-    volume        = 1.0,
+    volume_db     = 0,      -- Basispegel in dB (0 = unity, <= -60 = stumm)
     files         = {},     -- {dateiname, ...}
     order         = {},     -- Indizes in files (Sequenz oder Shuffle)
     order_pos     = 0,
@@ -250,6 +253,19 @@ local audio_jukebox = {
                             -- vernachlaessigbar, weil last_attempt nur
                             -- im load_jukebox_track() gesetzt wird)
     available     = sys.provides and sys.provides("audio") or false,
+}
+
+-- Ducking: senkt den Pegel der aktiven Hintergrund-Quelle (Stream/
+-- Jukebox) waehrend der Wiedergabe einer Vordergrund-Video-Folie um
+-- CONFIG.audio_ducking_db ab. Trigger ist fg_video.res ~= nil — kein
+-- separater Hook in fg_video_load/unload noetig. current_db ist der
+-- aktuell wirksame Offset (lineare dB-Rampe Richtung target_db ueber
+-- CONFIG.audio_ducking_fade Sekunden); apply_audio_levels rechnet
+-- ihn pro Frame fort und schreibt :volume(db_to_linear(base + offset))
+-- auf die aktive Quelle.
+local audio_ducking = {
+    current_db = 0,
+    last_t     = nil,    -- sys.now() der letzten Rampen-Anwendung
 }
 
 -- Math-RNG einmalig seeden, damit Shuffle nicht in jeder Session
@@ -342,6 +358,16 @@ local function db_to_linear(db)
     if db <= -60  then return 0   end
     if db >=   0  then return 1   end
     return 10 ^ (db / 20)
+end
+
+-- dB-Wert auf [-60, 0] clampen. Stream-Audio kann von info-beamer
+-- nicht verstaerkt werden, und unterhalb von -60 dB ist alles
+-- praktisch stumm. Default 0 fuer nil (kein Pegelversatz).
+local function clamp_db(db)
+    if type(db) ~= "number" then return 0 end
+    if db >   0  then return 0   end
+    if db < -60  then return -60 end
+    return db
 end
 
 -- URL-Sanitizer: percent-kodiert alle Bytes >= 0x80 (Non-ASCII).
@@ -820,18 +846,68 @@ local function update_audio_routing()
         pcall(function() audio_jukebox.res:volume(0) end)
     end
 
-    -- Aktiviere Ziel.
+    -- Aktiviere Ziel. Stream/Jukebox-Volume wird NICHT hier gesetzt,
+    -- sondern pro Frame in apply_audio_levels() — damit der Ducking-
+    -- Ramp (waehrend FG-Video laeuft) nicht von einem Routing-Edge
+    -- ueberschrieben wird und neu aktivierte Quellen ggf. bereits
+    -- mit reduziertem Pegel einsetzen.
     if target == "backup" then
         video_play(backup_slot)
     elseif target == "background" then
         video_play(background_slot)
-    elseif target == "stream" and audio_stream.res then
-        pcall(function() audio_stream.res:volume(audio_stream.volume) end)
-    elseif target == "jukebox" and audio_jukebox.res then
-        pcall(function() audio_jukebox.res:volume(audio_jukebox.volume) end)
     end
 
     audio_active = target
+end
+
+-- Pegel-Anwendung pro Frame: berechnet die laufende Ducking-Rampe
+-- (lineare dB-Bewegung Richtung target_db) und schreibt den
+-- resultierenden Pegel auf die aktive Stream/Jukebox-Quelle.
+-- Backup-/BG-Video-Audio nutzen :start()/:stop()-Mute (siehe
+-- update_audio_routing) und sind hier nicht beteiligt — auf Pi 3B
+-- ist BG-Video waehrend FG ohnehin via background_yield() disposed,
+-- auf Pi 4+ wird genauso geyielded; ein FG-Video laeuft also nie
+-- parallel zu einer BG-Video-Audioquelle.
+local function apply_audio_levels()
+    -- Ducking nur bei negativem Konfigurationswert wirksam — 0 (oder
+    -- ungueltig) deaktiviert das Feature.
+    local cfg_db = CONFIG.audio_ducking_db or 0
+    local target_db
+    if fg_video.res and cfg_db < 0 then
+        target_db = cfg_db
+    else
+        target_db = 0
+    end
+
+    local now_t = sys.now()
+    local dt = (audio_ducking.last_t and (now_t - audio_ducking.last_t)) or 0
+    if dt < 0 then dt = 0 end
+    audio_ducking.last_t = now_t
+
+    local fade = CONFIG.audio_ducking_fade or 0
+    local span = math.abs(cfg_db)
+    if fade <= 0 or span <= 0 then
+        audio_ducking.current_db = target_db
+    elseif audio_ducking.current_db ~= target_db then
+        local rate = span / fade   -- dB pro Sekunde (volle Strecke / Rampe)
+        local diff = target_db - audio_ducking.current_db
+        local step = rate * dt
+        if math.abs(diff) <= step then
+            audio_ducking.current_db = target_db
+        elseif diff > 0 then
+            audio_ducking.current_db = audio_ducking.current_db + step
+        else
+            audio_ducking.current_db = audio_ducking.current_db - step
+        end
+    end
+
+    if audio_active == "stream" and audio_stream.res then
+        local lvl = db_to_linear(audio_stream.volume_db + audio_ducking.current_db)
+        pcall(function() audio_stream.res:volume(lvl) end)
+    elseif audio_active == "jukebox" and audio_jukebox.res then
+        local lvl = db_to_linear(audio_jukebox.volume_db + audio_ducking.current_db)
+        pcall(function() audio_jukebox.res:volume(lvl) end)
+    end
 end
 
 ------------------------------------------------------------
@@ -1049,8 +1125,8 @@ util.file_watch("config.json", function(raw)
     -- wuerde.
     local stream_url = cfg.audio_stream_url
     if type(stream_url) ~= "string" then stream_url = "" end
-    audio_stream.url     = stream_url:match("^%s*(.-)%s*$") or ""
-    audio_stream.volume  = db_to_linear(tonumber(cfg.audio_stream_volume_db))
+    audio_stream.url       = stream_url:match("^%s*(.-)%s*$") or ""
+    audio_stream.volume_db = clamp_db(tonumber(cfg.audio_stream_volume_db))
 
     -- Jukebox-Playlist parsen. Reihenfolge im Setup ist Reihenfolge
     -- der sequenziellen Wiedergabe. Leere/ungueltige Eintraege werden
@@ -1080,10 +1156,19 @@ util.file_watch("config.json", function(raw)
     end
     local shuffle_changed = (new_shuffle ~= audio_jukebox.shuffle)
 
-    audio_jukebox.enabled = cfg.audio_jukebox_enabled and true or false
-    audio_jukebox.shuffle = new_shuffle
-    audio_jukebox.volume  = db_to_linear(tonumber(cfg.audio_jukebox_volume_db))
-    audio_jukebox.files   = new_files
+    audio_jukebox.enabled   = cfg.audio_jukebox_enabled and true or false
+    audio_jukebox.shuffle   = new_shuffle
+    audio_jukebox.volume_db = clamp_db(tonumber(cfg.audio_jukebox_volume_db))
+    audio_jukebox.files     = new_files
+
+    -- Audio-Ducking: Absenkung waehrend FG-Video-Wiedergabe. clamp_db
+    -- begrenzt auf [-60, 0]; Werte > 0 werden auf 0 gesetzt (= Feature
+    -- deaktiviert), darunter ist die Quelle praktisch stumm. Fade-Dauer
+    -- darf nicht negativ werden — 0 bedeutet "harter Sprung".
+    CONFIG.audio_ducking_db = clamp_db(tonumber(cfg.audio_ducking_db))
+    local fade = tonumber(cfg.audio_ducking_fade)
+    if fade == nil or fade < 0 then fade = 0.25 end
+    CONFIG.audio_ducking_fade = fade
 
     if files_changed or shuffle_changed then
         rebuild_jukebox_order()
@@ -1145,16 +1230,9 @@ util.file_watch("config.json", function(raw)
     corner_logo.y       = tonumber(cfg.logo_y) or 0
     update_corner_logo(resolve_resource(cfg.logo_image))
 
-    -- Pegel-Änderung im laufenden Stream sofort übernehmen, ohne
-    -- erst auf den nächsten Routing-Wechsel zu warten.
-    -- (audio_stream.enabled/url/volume wurden weiter oben gesetzt,
-    -- damit BG-Video-Reload den richtigen Audio-Modus bekommt.)
-    if audio_active == "stream" and audio_stream.res then
-        pcall(function() audio_stream.res:volume(audio_stream.volume) end)
-    end
-    if audio_active == "jukebox" and audio_jukebox.res then
-        pcall(function() audio_jukebox.res:volume(audio_jukebox.volume) end)
-    end
+    -- Pegel-Aenderungen werden pro Frame in apply_audio_levels()
+    -- aus volume_db + Ducking-Offset frisch berechnet — ein
+    -- separater Volume-Set hier ist nicht noetig.
 
     -- Slot-Wechsel können das Audio-Ziel verändern (Disposal des
     -- aktiven Videos). Routing-Stand zurücksetzen, damit der nächste
@@ -1658,4 +1736,11 @@ function node.render()
 
     -- Cornerlogo IMMER ganz oben.
     draw_corner_logo()
+
+    -- Pegel-Anwendung am Frame-Ende: damit ein in dieser Render-Phase
+    -- ausgeloester Slide-Wechsel (fg_video_load setzt fg_video.res)
+    -- noch im SELBEN Frame den Ducking-Fade startet — sonst entstuende
+    -- ein Frame Latenz zwischen visuellem Wechsel auf den FG-Layer und
+    -- Beginn der Pegelabsenkung.
+    apply_audio_levels()
 end

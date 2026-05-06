@@ -223,6 +223,25 @@
             "hint": "Pixel von oben (obere Kante des Bildschirms)."
         },
         {
+            "title": "Audio-Ducking",
+            "type": "section",
+            "intro": "Senkt Stream/Jukebox temporär ab, solange ein Vordergrund-Video läuft, damit dessen Tonspur durchkommt. Wirkt additiv auf den jeweils eingestellten Basispegel."
+        },
+        {
+            "title": "Ducking-Absenkung (dB)",
+            "name": "audio_ducking_db",
+            "type": "float",
+            "default": 0,
+            "hint": "Pegelabsenkung der Hintergrundmusik während ein Vordergrund-Video spielt. 0 = keine Absenkung, -12 dB ≈ ¼ Lautstärke, -20 dB stark abgesenkt, ≤ -60 dB stumm. Werte > 0 werden auf 0 begrenzt."
+        },
+        {
+            "title": "Ducking-Übergang (Sekunden)",
+            "name": "audio_ducking_fade",
+            "type": "float",
+            "default": 0.25,
+            "hint": "Ramp-Dauer in Sekunden für das Ein- und Ausblenden des Duckings. 0.15–0.30 s wirken natürlich; höhere Werte überlagern länger, niedrigere klingen abrupt."
+        },
+        {
             "title": "Hintergrund-Audio (Stream)",
             "type": "section",
             "intro": "Optionaler HTTP-/Icecast-Stream. Priorität: Backup-Video-Audio > Stream > Jukebox > Hintergrund-Video-Audio. Pi 4+ erforderlich."
