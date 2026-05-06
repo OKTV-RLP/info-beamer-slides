@@ -386,6 +386,14 @@ local SLIDE_WINDOW = 5
 -- gilt der Slot als "ready", damit der Render-Loop ueber kaputte
 -- Folien nicht endlos haengt — draw_fit(nil) faellt dann auf reines
 -- BG zurueck.
+--
+-- :state() == "error" (Decode-Fehler nach erfolgreichem Load-Aufruf,
+-- z.B. korrupte Datei, unsupported PNG-Variante) markiert den Slot
+-- als failed und gibt true zurueck — andernfalls bliebe er permanent
+-- "not ready" und wuerde den globalen any_image_in_flight()-Gate
+-- dauerhaft blockieren. Unbekannte States (zukuenftige info-beamer-
+-- Versionen, Race-Conditions) fallen auf den :size()-Heuristik-Pfad
+-- zurueck, statt fix mit false zu antworten.
 local function image_ready(slot)
     if not slot then return false end
     if slot.failed then return true end
@@ -393,7 +401,14 @@ local function image_ready(slot)
     if not res then return false end
     local ok, st = pcall(function() return res:state() end)
     if ok and type(st) == "string" then
-        return st == "loaded"
+        if st == "loaded" then return true end
+        if st == "error"  then
+            slot.failed = true
+            print("Folie nicht dekodierbar: " .. tostring(slot.file))
+            return true
+        end
+        if st == "loading" then return false end
+        -- unbekannter State: defensiver Fallback ueber :size()
     end
     local ok2, w = pcall(function() return res:size() end)
     return ok2 and (tonumber(w) or 0) > 0
@@ -467,15 +482,36 @@ end
 -- Auf Pi 3B verhindert das Lastpeaks (parallele PNG-Decodes
 -- konkurrieren um CPU, RAM und GEM-Allokationen — derselbe Druck,
 -- der den urspruenglichen OOM ausgeloest hat).
+--
+-- Performance: die Unload-Phase iteriert ueber alle n Slides und
+-- aendert sich nur, wenn sich das Window oder die slides-Liste
+-- selbst aendern. Bei langer Playlist und 50 fps waere O(n) pro
+-- Frame unnoetig teuer auf Pi 3B — daher cachen wir das letzte
+-- effektive (lo, hi, slides_id) und ueberspringen die Unload-
+-- Phase, wenn sich nichts geaendert hat. swap_slides invalidiert
+-- den Cache via reconcile_window_invalidate().
+local last_window_lo, last_window_hi, last_window_id = nil, nil, nil
+
+local function reconcile_window_invalidate()
+    last_window_lo, last_window_hi, last_window_id = nil, nil, nil
+end
+
 local function reconcile_window(start_idx)
     local n = #slides
-    if n == 0 then return end
+    if n == 0 then
+        reconcile_window_invalidate()
+        return
+    end
     local lo = math.max(1, start_idx or 1)
     local hi = math.min(n, lo + SLIDE_WINDOW - 1)
-    for i = 1, n do
-        if i < lo or i > hi then
-            unload_slot(slides[i])
+    if last_window_lo ~= lo or last_window_hi ~= hi
+       or last_window_id ~= slides then
+        for i = 1, n do
+            if i < lo or i > hi then
+                unload_slot(slides[i])
+            end
         end
+        last_window_lo, last_window_hi, last_window_id = lo, hi, slides
     end
     if any_image_in_flight(start_idx) then return end
     -- Phase 1: Aktuelles Window auffuellen (sichtbarer Bedarf zuerst).
@@ -1112,6 +1148,9 @@ local function swap_slides(new_list)
             end
         end
     end
+    -- slides-Identitaet hat sich geaendert: reconcile_window-Cache
+    -- invalidieren, damit die naechste Unload-Phase wieder laeuft.
+    reconcile_window_invalidate()
 end
 
 ------------------------------------------------------------
@@ -1785,7 +1824,20 @@ function node.render()
             end
             if nxt_slot and nxt_slot.kind == "image"
                and not image_ready(nxt_slot) then
-                preload_slot(nxt_slot)
+                -- Preload-Trigger nur, wenn aktuell kein anderer
+                -- Decode in Flight ist — sonst wuerde dieser Render-
+                -- Loop-Pfad den globalen Sequentialisierungs-Gate
+                -- aushebeln und einen zweiten parallelen Decode
+                -- starten. Im Normalfall hat reconcile_window den
+                -- Slot ohnehin laengst angetriggert; das hier ist
+                -- nur Sicherung gegen pathologisch kurze Standzeiten,
+                -- bei denen der Wechsel schneller kommt als der
+                -- naechste reconcile-Tick. Bei laufendem Decode
+                -- einfach defern — der naechste Frame prueft
+                -- erneut.
+                if not any_image_in_flight(current_idx) then
+                    preload_slot(nxt_slot)
+                end
                 should_advance = false
                 -- elapsed am Advance-Schwellwert klemmen, damit der
                 -- naechste Frame sofort wieder prueft, ohne dass
