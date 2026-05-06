@@ -370,7 +370,17 @@ end
 -- vollstaendig vorzuladen sprengt das CMA und triggert "Cannot alloc
 -- texture: out of memory" mit Watchdog-Reboot. Stattdessen: nur
 -- current_idx + (SLIDE_WINDOW-1) Folgefolien als Texturen halten, der
--- Rest bleibt Metadaten-only. Reconcile laeuft bei jedem Slide-Wechsel.
+-- Rest bleibt Metadaten-only. Reconcile laeuft am Frame-Ende.
+--
+-- Das Window ist zyklisch: am Playlist-Ende wrappt es zu slides[1]
+-- zurueck, sodass am letzten Slide schon der naechste Cycle-Wrap-
+-- Target im Vorrat liegt. Ohne Wrap-Around muesste slides[1] am
+-- Cycle-Ende per Transition-Gate "kalt" geladen werden — das wuerde
+-- nicht nur einen sichtbaren Delay produzieren, sondern auch die
+-- Sequentialitaets-Garantie brechen, weil ein ausserhalb des
+-- linearen Windows gestarteter Decode von any_image_in_flight()
+-- nicht gesehen wuerde und reconcile_window-Phase 2 parallel
+-- pending_slides[1] anstossen koennte.
 --
 -- Window-Groesse 5: deckt sicher auch laengere Ketten kurzer
 -- Slide-Dauern ab (Transition-Gate verzoegert ohnehin, falls die
@@ -378,6 +388,20 @@ end
 -- Peak-GPU-Footprint bleibt mit 5 × 8 MB = 40 MB weit unter dem
 -- CMA-Budget.
 local SLIDE_WINDOW = 5
+
+-- Liefert die zyklischen Indizes des aktuellen Sliding-Windows.
+-- Bei n < SLIDE_WINDOW wird nur n-mal iteriert (kein doppelter
+-- Slot). Reihenfolge: current_idx zuerst, dann monoton steigend
+-- mit Wrap-Around.
+local function window_indices(start_idx, n)
+    local count = math.min(SLIDE_WINDOW, n)
+    local start = math.max(1, start_idx or 1)
+    local indices = {}
+    for i = 0, count - 1 do
+        indices[i + 1] = ((start - 1 + i) % n) + 1
+    end
+    return indices
+end
 
 -- Image-Resource eines Slots freigeben, mit Outgoing-Handoff:
 -- wenn die Resource gerade vom Cycle-Crossfade als outgoing
@@ -431,8 +455,10 @@ local function image_ready(slot)
         if st == "loading" then return false end
         -- unbekannter State: defensiver Fallback ueber :size()
     end
-    local ok2, w = pcall(function() return res:size() end)
-    return ok2 and (tonumber(w) or 0) > 0
+    local ok2, w, h = pcall(function() return res:size() end)
+    return ok2
+       and (tonumber(w) or 0) > 0
+       and (tonumber(h) or 0) > 0
 end
 
 -- Image-Slot ist konkret zeichenbar: Resource existiert, ist
@@ -483,15 +509,22 @@ end
 
 -- Returns true wenn aktuell irgendwo ein Image-Decode in Flight ist
 -- (s.res gesetzt, aber noch nicht "loaded"). Geprueft wird sowohl
--- das aktuelle slides-Window als auch pending_slides[1] — beide
--- teilen sich den globalen In-Flight-Gate, damit auf Pi 3B nie
--- zwei PNG-Decodes parallel laufen.
+-- das aktuelle (zyklische) slides-Window als auch pending_slides[1]
+-- — beide teilen sich den globalen In-Flight-Gate, damit auf Pi 3B
+-- nie zwei PNG-Decodes parallel laufen.
 local function any_image_in_flight(start_idx)
     local n = #slides
-    local lo = math.max(1, start_idx or 1)
-    local hi = math.min(n, lo + SLIDE_WINDOW - 1)
-    for i = lo, hi do
-        local s = slides[i]
+    if n == 0 then
+        if pending_slides and pending_slides[1] then
+            local p = pending_slides[1]
+            if p.kind == "image" and p.res and not image_ready(p) then
+                return true
+            end
+        end
+        return false
+    end
+    for _, idx in ipairs(window_indices(start_idx, n)) do
+        local s = slides[idx]
         if s and s.kind == "image" and s.res and not image_ready(s) then
             return true
         end
@@ -505,30 +538,31 @@ local function any_image_in_flight(start_idx)
     return false
 end
 
--- Stellt sicher, dass slides[start_idx .. start_idx+SLIDE_WINDOW-1]
--- geladen sind und alle anderen disposed. Aufruf am Frame-Ende.
+-- Stellt sicher, dass das zyklische Window geladen ist und alle
+-- anderen Slots disposed. Aufruf am Frame-Ende.
 --
 -- Loads laufen sequenziell: pro Aufruf wird hoechstens EIN neuer
 -- Decode-Task an den Threadpool gegeben, und nur wenn weder im
 -- Window noch in pending_slides[1] ein Decode in Flight ist.
--- Reihenfolge: aktuelles Window zuerst (sichtbarer Bedarf),
--- pending_slides[1] zuletzt (wird erst beim naechsten Cycle-Wrap
--- gebraucht und hat damit typisch viele Slide-Dauern Vorlauf).
--- Auf Pi 3B verhindert das Lastpeaks (parallele PNG-Decodes
--- konkurrieren um CPU, RAM und GEM-Allokationen — derselbe Druck,
--- der den urspruenglichen OOM ausgeloest hat).
+-- Reihenfolge: aktuelles Window zuerst (sichtbarer Bedarf in
+-- monotoner Slide-Reihenfolge inkl. Wrap-Around), dann
+-- pending_slides[1] (wird erst beim naechsten Cycle-Wrap als
+-- Crossfade-Target gebraucht). Auf Pi 3B verhindert das
+-- Lastpeaks (parallele PNG-Decodes konkurrieren um CPU, RAM und
+-- GEM-Allokationen — derselbe Druck, der den urspruenglichen OOM
+-- ausgeloest hat).
 --
 -- Performance: die Unload-Phase iteriert ueber alle n Slides und
--- aendert sich nur, wenn sich das Window oder die slides-Liste
--- selbst aendern. Bei langer Playlist und 50 fps waere O(n) pro
--- Frame unnoetig teuer auf Pi 3B — daher cachen wir das letzte
--- effektive (lo, hi, slides_id) und ueberspringen die Unload-
--- Phase, wenn sich nichts geaendert hat. swap_slides invalidiert
--- den Cache via reconcile_window_invalidate().
-local last_window_lo, last_window_hi, last_window_id = nil, nil, nil
+-- aendert sich nur, wenn sich das Window (start, n) oder die
+-- slides-Liste selbst aendern. Bei langer Playlist und 50 fps
+-- waere O(n) pro Frame unnoetig teuer auf Pi 3B — daher cachen
+-- wir (start, n, slides_id) und ueberspringen die Unload-Phase,
+-- wenn sich nichts geaendert hat. swap_slides invalidiert den
+-- Cache via reconcile_window_invalidate().
+local last_window_start, last_window_n, last_window_id = nil, nil, nil
 
 local function reconcile_window_invalidate()
-    last_window_lo, last_window_hi, last_window_id = nil, nil, nil
+    last_window_start, last_window_n, last_window_id = nil, nil, nil
 end
 
 local function reconcile_window(start_idx)
@@ -537,30 +571,35 @@ local function reconcile_window(start_idx)
         reconcile_window_invalidate()
         return
     end
-    local lo = math.max(1, start_idx or 1)
-    local hi = math.min(n, lo + SLIDE_WINDOW - 1)
-    if last_window_lo ~= lo or last_window_hi ~= hi
+    local start = math.max(1, start_idx or 1)
+    local indices = window_indices(start, n)
+    if last_window_start ~= start or last_window_n ~= n
        or last_window_id ~= slides then
+        local in_window = {}
+        for _, idx in ipairs(indices) do in_window[idx] = true end
         for i = 1, n do
-            if i < lo or i > hi then
+            if not in_window[i] then
                 unload_slot(slides[i])
             end
         end
-        last_window_lo, last_window_hi, last_window_id = lo, hi, slides
+        last_window_start, last_window_n, last_window_id = start, n, slides
     end
     if any_image_in_flight(start_idx) then return end
-    -- Phase 1: Aktuelles Window auffuellen (sichtbarer Bedarf zuerst).
-    for i = lo, hi do
-        local s = slides[i]
+    -- Phase 1: Aktuelles Window auffuellen (sichtbarer Bedarf zuerst,
+    -- in monotoner Slide-Reihenfolge mit Wrap-Around).
+    for _, idx in ipairs(indices) do
+        local s = slides[idx]
         if s and s.kind == "image" and not s.res and not s.failed then
             preload_slot(s)
             return
         end
     end
     -- Phase 2: pending_slides[1] vorladen — wird beim naechsten
-    -- Cycle-Wrap als Crossfade-Target gebraucht. Erst hier, weil
-    -- der aktuelle Bedarf Vorrang hat. Slot 2..N von pending werden
-    -- erst nach dem Swap durch reconcile in Folgeframes nachgezogen.
+    -- Cycle-Wrap als Crossfade-Target gebraucht (nur wenn ein
+    -- Manifest-Update aktiv ist; sonst greift der Wrap-Around des
+    -- aktiven Windows). Erst hier, weil der aktuelle Bedarf Vorrang
+    -- hat. Slot 2..N von pending werden erst nach dem Swap durch
+    -- reconcile in Folgeframes nachgezogen.
     if pending_slides and pending_slides[1] then
         local p = pending_slides[1]
         if p.kind == "image" and not p.res and not p.failed then
