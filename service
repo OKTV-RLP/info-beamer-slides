@@ -207,11 +207,17 @@ def push_time(text):
 # ============================================================
 
 # Probe-Intervall: ok-Fall 5 s, fail-Fall 3 s (schnellere Recovery).
-# Probe-Timeout: 2.5 s (lang genug fuer langsame Server, kurz genug
-# um den 1-Hz-Tick im sleep_with_time_ticks-Loop nicht zu stoeren).
+# Probe-Timeout: 1.5 s. Der Probe laeuft synchron im
+# sleep_with_time_ticks-Loop und blockiert dort die naechste Iteration
+# entsprechend lange — beim Maximalwert verzoegert das einen Time-IPC-
+# Tick um bis zu 1.5 s (sichtbar nur bei sekundengenauen Time-Formaten,
+# bei %H:%M unmerklich). Server, die laenger als 1.5 s zur Antwort
+# brauchen, werden als fail markiert; in der Praxis triggern solche
+# Server auch fuer load_audio Timeouts und sollten nicht angesprochen
+# werden.
 _PROBE_INTERVAL_OK   = 5.0
 _PROBE_INTERVAL_FAIL = 3.0
-_PROBE_TIMEOUT       = 2.5
+_PROBE_TIMEOUT       = 1.5
 
 _audio_probe_state = {
     "next_at":  0.0,
@@ -350,10 +356,16 @@ def update_time(cfg):
 
 
 def sleep_with_time_ticks(total_seconds):
-    """Schlaeft total_seconds, pusht den Zeit-Text jede Sekunde via
-    UDP an den Lua-Knoten — sodass das Zeit-Overlay nicht erst nach
-    poll_interval aktualisiert wird. Re-loaded config jede Sekunde,
-    damit Format-/Timezone-Aenderungen latenzarm einschlagen."""
+    """Schlaeft total_seconds, pusht den Zeit-Text grob im 1-Hz-Takt
+    via UDP an den Lua-Knoten — sodass das Zeit-Overlay nicht erst
+    nach poll_interval aktualisiert wird. Re-loaded config jede
+    Iteration, damit Format-/Timezone-Aenderungen latenzarm
+    einschlagen.
+
+    Der Takt ist nicht streng 1 Hz: ein synchrones Audio-Probe
+    (s. _PROBE_TIMEOUT) kann eine Iteration um bis zu 1.5 s
+    verlaengern. Bei sekundengenauen Zeit-Formaten ist das gelegentlich
+    sichtbar (~alle 5 s ein Stutter); bei %H:%M unmerklich."""
     end = time.time() + total_seconds
     while True:
         cfg = load_config()
@@ -433,20 +445,21 @@ def main():
             # adressiert (gleicher Name == gleicher Inhalt), daher reicht
             # eine Existenzpruefung im Cache.
             #
-            # Zwischen den Downloads loest sleep_with_time_ticks(0) einen
-            # Zeit- und Audio-Probe-Tick aus, damit der Renderer auch
-            # waehrend laengerer Download-Phasen frische Heartbeats
-            # bekommt — sonst wuerde die Audio-Probe Lua-seitig stale
+            # Vor jedem tatsaechlichen Download (nicht bei Cache-Hits)
+            # loest sleep_with_time_ticks(0) einen Zeit- und Audio-
+            # Probe-Tick aus, damit der Renderer auch waehrend
+            # laengerer Download-Phasen frische Heartbeats bekommt —
+            # sonst wuerde die Audio-Probe Lua-seitig stale
             # (>stale_after, derzeit 60 s) und Reload pausiert unnoetig.
             # Worst Case: ein einzelner Download blockiert bis 30 s —
             # innerhalb dieses Fensters laeuft kein Tick, aber der
             # Renderer erholt sich automatisch beim naechsten Tick
             # zwischen den Downloads.
             for entry in entries:
-                sleep_with_time_ticks(0)
                 local = slide_filename(entry["name"])
                 if os.path.exists(local):
                     continue
+                sleep_with_time_ticks(0)
                 try:
                     download_to(base_url + entry["name"], local, verify, 30)
                 except Exception as e:

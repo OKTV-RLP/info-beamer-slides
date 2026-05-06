@@ -1016,7 +1016,12 @@ util.file_watch("config.json", function(raw)
     -- update_media_slot disposed+reloadet das BG-Video automatisch beim
     -- Toggle ueber den slot.audio_loaded-Vergleich.
     audio_stream.enabled = cfg.audio_stream_enabled and true or false
-    audio_stream.url     = cfg.audio_stream_url or ""
+    -- Whitespace trimmen, damit die URL identisch zu der vom Sidecar
+    -- gepruften ist (Sidecar strippt im service vor Probe + IPC).
+    -- Sonst wuerde audio_probe.url ~= audio_stream.url und der
+    -- Reload-Gate dauerhaft blocken bei fuehrenden/trailing Spaces
+    -- im Setup-Eintrag.
+    audio_stream.url     = (cfg.audio_stream_url or ""):match("^%s*(.-)%s*$") or ""
     audio_stream.volume  = db_to_linear(tonumber(cfg.audio_stream_volume_db))
 
     -- Jukebox-Playlist parsen. Reihenfolge im Setup ist Reihenfolge

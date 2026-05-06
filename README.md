@@ -24,7 +24,7 @@ service        ← Python-Sidecar:
                  manifest.json + slide_*.png (Folien-Dateien
                  mit Prefix im Knoten-Wurzelverzeichnis)
                  +  UDP localhost:4444 → "root/time:<text>"
-                                       → "root/audio_probe:ok|fail"
+                                       → "root/audio_probe:<ok|fail>:<url>"
                        │
                        ▼
 node.lua       ← Renderer:
