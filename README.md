@@ -80,9 +80,11 @@ node.lua       ← Renderer:
 1. Diesen Ordner als Package nach info-beamer hosted hochladen
    (`Packages → Upload`).
 2. Auf Basis des Packages ein Setup anlegen.
-3. **Quelle**: `Playlist-URL` und `Folien-Basis-URL` des Infotext-
-   Servers eintragen. Bei selbstsigniertem Zertifikat *Self-signed-
-   HTTPS akzeptieren* einschalten.
+3. **Quelle**: `Playlist-URL` eintragen. `Basis-URL` optional — leer
+   lassen, wenn Folien neben der Playlist liegen; sonst relatives
+   Verzeichnis (`videos/`) oder vollständige URL (`https://cdn/...`)
+   eintragen. Bei selbstsigniertem Zertifikat *Self-signed-HTTPS
+   akzeptieren* einschalten.
 4. **Optional Backup/Hintergrund**: eigenes Bild- oder Video-Asset
    hochladen und im Setup auswählen.
 5. **Optional Zeit-Overlay**: aktivieren, Format und Position einstellen.
@@ -101,7 +103,7 @@ node.lua       ← Renderer:
 | Option | Default | Beschreibung |
 |---|---|---|
 | Playlist-URL | – | M3U8-Playlist-URL (http:// oder https://) |
-| Folien-Basis-URL | – | Verzeichnis-URL der Folien-Bilder |
+| Basis-URL | "" | Wurzel für relative Playlist-Einträge (s. *Playlist-Format*). Leer = Verzeichnis der Playlist-URL |
 | Self-signed-HTTPS akzeptieren | false | TLS-Prüfung deaktivieren |
 | Polling-Intervall | 60 s | Wie oft der Service die Playlist prüft |
 | Wiederholversuch | 30 s | Pause nach HTTP-Fehler oder leerer Playlist |
@@ -399,23 +401,39 @@ Sekunde):
 
 ## Playlist-Format und Adressierung
 
-Die M3U/M3U8-Playlist kann pro Eintrag drei Schreibweisen enthalten:
+Die M3U/M3U8-Playlist kann pro Eintrag drei Schreibweisen enthalten,
+die zusammen mit dem Setup-Wert *Basis-URL* (`base_url`) auflösen:
 
-| Schreibweise | Beispiel | Download-URL |
+**Basis-URL-Auflösung (Setup-Feld `base_url`):**
+
+| `base_url`-Wert | Effektive Basis für relative Playlist-Einträge |
+|---|---|
+| Leer (Default) | Verzeichnis der Playlist-URL |
+| Relativ, z. B. `videos/` | Playlist-Verzeichnis + `videos/` |
+| Vollständige URL, z. B. `https://cdn.example.com/v/` | wird komplett übernommen |
+
+**Playlist-Eintrag-Auflösung:**
+
+| Schreibweise | Beispiel | Wirkung |
 |---|---|---|
-| Reiner Dateiname | `clip.mp4` | `<folien_base_url>/clip.mp4` |
-| Relativer Pfad | `videos/clip.mp4` | `<folien_base_url>/videos/clip.mp4` |
-| Vollständige URL | `https://cdn.example.com/v/clip.mp4` | wird so wie angegeben gezogen |
+| Reiner Dateiname | `clip.mp4` | wird gegen die effektive Basis-URL aufgelöst |
+| Relativer Pfad | `videos/clip.mp4` | wird gegen die effektive Basis-URL aufgelöst |
+| Vollständige URL | `https://cdn.example.com/v/clip.mp4` | absolut, ignoriert `base_url` |
+| Server-absoluter Pfad | `/abs/clip.mp4` | gegen den Host der effektiven Basis-URL |
 
-Server-absolute Pfade (`/abs/clip.mp4`) werden gegen die Host-Wurzel der
-`folien_base_url` aufgelöst. Query-Strings und Fragmente in URLs werden
-beim Download mitgesendet, fließen aber nicht in den Cache-Filename ein.
+Beispiel: `playlist_url = https://server/show/list.m3u8`,
+`base_url = videos/`, Eintrag `clip.mp4` →
+Download von `https://server/show/videos/clip.mp4`.
 
-**Cache-Identität ist immer der Basename**: `clip.mp4` aus `cdn.example.com`
-und `clip.mp4` aus `<folien_base_url>` würden auf denselben Cache-Slot
-fallen — die ausliefernden Server müssen daher die Invariante "gleicher
-Basename = gleicher Inhalt" einhalten. Wechsel des Hosts oder Pfads sind
-unkritisch, solange diese Invariante gilt.
+Query-Strings und Fragmente in URLs werden beim Download mitgesendet,
+fließen aber nicht in den Cache-Filename ein.
+
+**Cache-Identität ist immer der Basename**: `clip.mp4` aus
+`cdn.example.com` und `clip.mp4` aus dem Playlist-Verzeichnis würden
+auf denselben Cache-Slot fallen — die ausliefernden Server müssen
+daher die Invariante "gleicher Basename = gleicher Inhalt" einhalten.
+Wechsel des Hosts oder Pfads sind unkritisch, solange diese Invariante
+gilt.
 
 Percent-Encoding im Basename (`cl%C3%A4p.mp4` → `cläp.mp4`) wird beim
 Erzeugen des Cache-Filenames aufgelöst, sodass URL-encoded und direkt
@@ -450,7 +468,7 @@ Falls du auf einem Pi außerhalb der Hosted-Plattform testen willst:
 cat > config.json <<EOF
 {
     "playlist_url": "https://dein-server/slides/playlist.m3u8",
-    "folien_base_url": "https://dein-server/slides/",
+    "base_url": "",
     "allow_insecure_https": false,
     "poll_interval": 60,
     "retry_interval": 30,

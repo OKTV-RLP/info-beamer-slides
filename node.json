@@ -16,11 +16,11 @@
             "hint": "URL der M3U8-Playlist. http:// und https:// werden unterstützt."
         },
         {
-            "title": "Folien-Basis-URL",
-            "name": "folien_base_url",
+            "title": "Basis-URL",
+            "name": "base_url",
             "type": "string",
-            "default": "https://example.com/slides/",
-            "hint": "Basis-URL des Folienverzeichnisses. Wird bei Bedarf um '/' am Ende ergänzt."
+            "default": "",
+            "hint": "Wurzel für relative Playlist-Einträge. Leer = Verzeichnis der Playlist-URL. Relativer Wert (z. B. 'videos/') wird gegen das Playlist-Verzeichnis aufgelöst. Vollständige URL (https://...) ersetzt das Playlist-Verzeichnis komplett. Vollständige URLs in der Playlist gelten immer absolut und ignorieren diesen Wert."
         },
         {
             "title": "Self-signed-HTTPS akzeptieren",

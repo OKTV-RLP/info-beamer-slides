@@ -126,10 +126,11 @@ def parse_playlist(text, default_dur):
     #   * vollstaendige URL          "https://cdn.example.com/clip.mp4"
     # In allen Faellen ist der Basename die kanonische Cache-/Content-
     # Identitaet (siehe basename_from_entry); der Original-Eintrag wird
-    # zusaetzlich als "url" gefuehrt und erst beim Download via
-    # urljoin gegen folien_base_url aufgeloest. Voraussetzung: der
-    # Inhaltslieferant garantiert "gleicher Basename = gleicher Inhalt"
-    # (aufrufende Server enforcen das).
+    # zusaetzlich als "url" gefuehrt und erst beim Download gegen die
+    # effektive Basis-URL aufgeloest (zusammengesetzt aus playlist_url
+    # und base_url, s. main()). Voraussetzung: der Inhaltslieferant
+    # garantiert "gleicher Basename = gleicher Inhalt" (aufrufende
+    # Server enforcen das).
     entries = []
     duration = default_dur
     for line in text.splitlines():
@@ -463,8 +464,8 @@ def main():
             # Zeit jede Hauptiteration auch frisch schreiben (zusaetzlich
             # zum 1-Hz-Tick im sleep_with_time_ticks).
             update_time(cfg)
-            playlist_url   = (cfg.get("playlist_url")    or "").strip()
-            base_url       = (cfg.get("folien_base_url") or "").strip()
+            playlist_url   = (cfg.get("playlist_url") or "").strip()
+            cfg_base_url   = (cfg.get("base_url")     or "").strip()
             default_dur    = int(cfg.get("default_duration") or 10)
             poll_interval  = max(5,  int(cfg.get("poll_interval")  or 60))
             retry_interval = max(5,  int(cfg.get("retry_interval") or 30))
@@ -473,13 +474,29 @@ def main():
             # Loop denselben Warning-Status sehen.
             verify         = get_https_verify(cfg)
 
-            if not playlist_url or not base_url:
-                log("playlist_url oder folien_base_url nicht konfiguriert.")
+            if not playlist_url:
+                log("playlist_url nicht konfiguriert.")
                 sleep_with_time_ticks(retry_interval)
                 continue
 
-            if not base_url.endswith("/"):
-                base_url += "/"
+            # Effektive Basis-URL fuer Playlist-Eintraege berechnen.
+            # urljoin-Kette deckt alle drei base_url-Faelle ohne
+            # Fallunterscheidung ab:
+            #   leer       -> urljoin(playlist_url, "./") -> Playlist-Dir
+            #   relativ    -> urljoin(playlist_url, base_url) -> aufgeloest gegen Playlist-Dir
+            #   absolut    -> urljoin(playlist_url, base_url) -> base_url (urljoin erkennt http/https)
+            # Trailing "/" auf relative Werte forcieren, damit das
+            # nachfolgende urljoin gegen Eintraege als Verzeichnis
+            # behandelt wird ("subdir" wuerde sonst durch das
+            # naechste urljoin ueberschrieben statt darunter
+            # gehaengt).
+            if cfg_base_url and "://" not in cfg_base_url \
+                    and not cfg_base_url.endswith("/"):
+                cfg_base_url += "/"
+            if cfg_base_url:
+                base_url = urljoin(playlist_url, cfg_base_url)
+            else:
+                base_url = urljoin(playlist_url, "./")
 
             # Playlist holen. Wenn der Server keinen Charset-Header
             # mitliefert, raet requests fuer text/*-Content-Types
@@ -528,12 +545,16 @@ def main():
                 if os.path.exists(local):
                     continue
                 sleep_with_time_ticks(0)
-                # urljoin loest den Eintrag gegen die Folien-Basis-URL auf:
+                # base_url wurde oben aus playlist_url + cfg_base_url
+                # zur effektiven Basis aufgeloest. urljoin gegen den
+                # Playlist-Eintrag verhaelt sich dann nach RFC 3986:
                 #   * absolute URL (http://, https://) -> bleibt unveraendert
                 #   * server-absoluter Pfad ("/x.mp4") -> base_url-Host + Pfad
                 #   * relativer Pfad/Filename          -> base_url + entry
                 # Damit funktionieren reine Filenames, Unterverzeichnisse
-                # und vollstaendige Fremd-Server-URLs gleichermassen.
+                # und vollstaendige Fremd-Server-URLs gleichermassen,
+                # unabhaengig davon, ob cfg_base_url leer, relativ oder
+                # absolut konfiguriert wurde.
                 download_url = urljoin(base_url, entry["url"])
                 try:
                     download_to(download_url, local, verify, 30)
