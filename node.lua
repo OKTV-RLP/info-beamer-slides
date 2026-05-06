@@ -1614,6 +1614,15 @@ function node.render()
                 pending_slides = nil
             end
             current_idx = 1
+            -- Single-Slot-Loops (#slides == 1): beim Wrap zeigt
+            -- slides[1] auf denselben Lua-Pointer wie vor dem Wrap,
+            -- sodass der Slide-Wechsel-Hook (cur ~= last_cur) ohne
+            -- diesen Reset NICHT feuern wuerde — bei Video-Slides
+            -- bliebe fg_video.res im "finished"-State haengen und das
+            -- Video frieren auf dem letzten Frame ein, statt erneut
+            -- zu laden. Fuer Image-Slides ist der Hook ein No-op,
+            -- der Reset also unschaedlich.
+            last_cur = nil
         else
             current_idx = current_idx + 1
         end
