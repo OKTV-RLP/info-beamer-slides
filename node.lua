@@ -48,7 +48,7 @@
 --
 -- Single-Video-Playlist (#slides == 1, einziger Slot ist Video): das
 -- Video wird mit looped=true geladen — Decoder-internes nahtloses
--- Looping, frame-genau, ohne Dispose+Reload-Luecke. Das beibt fuer
+-- Looping, frame-genau, ohne Dispose+Reload-Luecke. Das bleibt fuer
 -- die gesamte Standzeit der Playlist so, bis ein Manifest-Update
 -- ueber den Sidecar eine neue Liste liefert (force-Advance via
 -- pending_slides bricht den Loop fuer den swap_slides-Pfad).
@@ -1602,14 +1602,17 @@ function node.render()
         if fg_video.res then
             local ok, st = pcall(function() return fg_video.res:state() end)
             should_advance = ok and (st == "finished" or st == "error")
-            -- Bei looped=true (Single-Video-Playlist) erreicht state()
-            -- nie "finished" — der Cycle-Wrap waere damit blockiert
-            -- und ein anliegendes pending_slides (Manifest-Update aus
-            -- dem Sidecar) wuerde nie angewandt. In genau dem Moment
-            -- erzwingen wir den Advance, damit der Wrap-Pfad
-            -- swap_slides aufrufen und auf die neue Liste umsteigen
-            -- kann.
-            if not should_advance and pending_slides then
+            -- Bei looped=true (Single-Video-Playlist, #slides == 1)
+            -- erreicht state() nie "finished" — der Cycle-Wrap waere
+            -- damit blockiert und ein anliegendes pending_slides
+            -- (Manifest-Update aus dem Sidecar) wuerde nie angewandt.
+            -- In genau dem Moment erzwingen wir den Advance, damit der
+            -- Wrap-Pfad swap_slides aufrufen und auf die neue Liste
+            -- umsteigen kann. Auf Multi-Slide-Playlists darf das nicht
+            -- greifen — dort laufen Videos bestimmungsgemaess bis
+            -- "finished" und ein Manifest-Update wartet auf das
+            -- regulaere Cycle-Ende.
+            if not should_advance and pending_slides and #slides == 1 then
                 should_advance = true
             end
         else
