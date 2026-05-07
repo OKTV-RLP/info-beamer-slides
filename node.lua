@@ -461,6 +461,24 @@ local function image_ready(slot)
        and (tonumber(h) or 0) > 0
 end
 
+-- Reine Resource-Drawable-Pruefung ohne Slot-Bezug — fuer Stellen,
+-- an denen wir nur ein nacktes resource-Handle haben (z.B.
+-- outgoing.res im Cycle-Crossfade, das nach set_outgoing nicht mehr
+-- mit einem Slot verknuepft ist). Im Gegensatz zu image_ready/
+-- image_drawable: keine Seiteneffekte (kein slot.failed-Setting,
+-- kein dispose). Logik mirror't den loaded/size-Pfad aus image_ready.
+local function resource_drawable(res)
+    if not res then return false end
+    local ok, st = pcall(function() return res:state() end)
+    if ok and type(st) == "string" then
+        return st == "loaded"
+    end
+    local ok2, w, h = pcall(function() return res:size() end)
+    return ok2
+       and (tonumber(w) or 0) > 0
+       and (tonumber(h) or 0) > 0
+end
+
 -- Image-Slot ist konkret zeichenbar: Resource existiert, ist
 -- erfolgreich dekodiert und nicht als failed markiert. Strenger
 -- als image_ready() — letztere liefert aus Gate-Sicht true fuer
@@ -2085,15 +2103,21 @@ function node.render()
             local slide_drawn = false
             if outgoing then
                 local cycle_elapsed = t - cycle_fade_start
-                -- Cycle-Fade nur, wenn beide Resourcen (outgoing UND
-                -- neue Slot-1-Textur) konkret zeichenbar sind.
-                -- image_drawable verlangt non-nil res + nicht failed
-                -- (image_ready allein wuerde failed-Slots als ready
-                -- behandeln und draw_crossfade mit nil-cur.res
-                -- aufrufen — slide_drawn=true blockiert dann den
-                -- Fallback-Draw).
-                local can_fade = outgoing.res
-                                 and outgoing.kind == "image"
+                -- Cycle-Fade nur, wenn BEIDE Resourcen konkret
+                -- zeichenbar sind:
+                --   outgoing.res via resource_drawable (kein Slot-
+                --     Bezug mehr nach set_outgoing — bei sehr kurzen
+                --     Slide-Dauern kann ein Slot mit res im
+                --     "loading"-State outgoing geworden sein, weil
+                --     should_advance den State von cur nicht prueft);
+                --   slides[current_idx] via image_drawable (verlangt
+                --     non-nil + not failed; image_ready allein wuerde
+                --     failed-Slots als ready behandeln und
+                --     draw_crossfade mit nil-cur.res aufrufen, was
+                --     slide_drawn=true setzt und den Fallback-Draw
+                --     blockiert).
+                local can_fade = outgoing.kind == "image"
+                                 and resource_drawable(outgoing.res)
                                  and image_drawable(slides[current_idx])
                 if can_fade and fade_dur > 0 and cycle_elapsed < fade_dur then
                     local progress = cycle_elapsed / fade_dur
