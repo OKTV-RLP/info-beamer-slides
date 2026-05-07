@@ -41,6 +41,28 @@ SLIDE_PREFIX = "slide_"
 MANIFEST     = "manifest.json"
 CONFIG       = "config.json"
 
+# Grace-Period fuer Cache-GC: Files, die nicht mehr in der aktuellen
+# Playlist enthalten sind, werden NICHT sofort geloescht, sondern erst
+# nach Ablauf dieser Frist. Hintergrund: der Lua-Renderer arbeitet mit
+# einem Sliding-Window-Preload (SLIDE_WINDOW = 5 in node.lua) und laedt
+# Folien jenseits des Windows erst bei Bedarf von Disk neu. Falls eine
+# Folie aus dem aktuellen Manifest-Update herausfaellt, sich aber noch
+# in der laufenden, vom Renderer gerade abgespielten Vorgaenger-Liste
+# befindet (weil der Swap erst am Cycle-Ende erfolgt), wuerde ein
+# sofortiges Loeschen sie ihrer Disk-Backing-Datei berauben — Renderer
+# zeigt dann reines BG, bis die naechste vorhandene Folie an der Reihe
+# ist. 1 Stunde deckt selbst sehr lange Cycle-Zeiten (lange Playlist
+# mit langer per-Folie Standdauer) konservativ ab. Pi-Disk ist
+# typischerweise 8-16 GB, zusaetzlich gehaltene Folien fuer eine Stunde
+# sind dort keine kritische Belastung.
+SLIDE_GRACE_SECONDS = 3600
+
+# Pro Filename: Unix-Timestamp, ab dem das File geloescht werden darf.
+# Wird beim ersten Erkennen als "nicht mehr in Playlist" gesetzt und
+# beim Zurueckkehren in die Playlist wieder entfernt. Modul-globaler
+# State, damit er ueber main()-Iterationen hinweg konsistent bleibt.
+_pending_deletions = {}
+
 # UDP-IPC zu info-beamer auf dem Standard-Port. Wird fuer das Push
 # des Zeit-Texts an den Lua-Knoten verwendet, statt eine Datei auf
 # der SD-Karte zu schreiben (~86k Writes/Tag bei sekundengenauer
@@ -596,20 +618,59 @@ def main():
             # erfolgreichem Playlist-Fetch (HTTP-Fehler springen vorher
             # per `continue`), daher kein versehentlicher Komplett-Wipe
             # wegen Netzproblem.
+            #
+            # Grace-Period: Files, die aus der Playlist gefallen sind,
+            # werden NICHT sofort geloescht (s. SLIDE_GRACE_SECONDS am
+            # Modulkopf). Stattdessen wird beim ersten Erkennen ein
+            # delete_at-Timestamp gesetzt; geloescht wird erst, wenn
+            # dieser ueberschritten ist. Files, die zwischenzeitlich
+            # wieder in die Playlist zurueckkehren, werden aus dem
+            # Pending-Dict entfernt. .tmp-Reste werden weiterhin sofort
+            # entfernt — die sind nie Teil einer aktiven Playlist.
             keep = set(slide_filename(e["name"]) for e in entries)
+            now_ts = time.time()
             removed = 0
+            seen_files = set()
             try:
                 for fname in os.listdir("."):
                     if not fname.startswith(SLIDE_PREFIX):
                         continue
-                    if fname.endswith(".tmp") or fname not in keep:
+                    seen_files.add(fname)
+
+                    if fname.endswith(".tmp"):
                         try:
                             os.remove(fname)
                             removed += 1
                         except OSError:
                             pass
+                        continue
+
+                    if fname in keep:
+                        if fname in _pending_deletions:
+                            del _pending_deletions[fname]
+                        continue
+
+                    delete_at = _pending_deletions.get(fname)
+                    if delete_at is None:
+                        _pending_deletions[fname] = now_ts + SLIDE_GRACE_SECONDS
+                    elif now_ts >= delete_at:
+                        try:
+                            os.remove(fname)
+                            removed += 1
+                        except OSError:
+                            pass
+                        _pending_deletions.pop(fname, None)
             except OSError as e:
                 log("Cache-GC fehlgeschlagen: %s" % e)
+
+            # Pending-Eintraege fuer Files, die nicht mehr auf Disk
+            # existieren (manuell entfernt, FS-Fehler), aufraeumen —
+            # sonst wuechse das Dict unbegrenzt bei haeufig wechselnden
+            # Playlists.
+            for fname in list(_pending_deletions):
+                if fname not in seen_files:
+                    del _pending_deletions[fname]
+
             if removed:
                 log("Cache aufgeraeumt: %d Datei(en) entfernt." % removed)
 
