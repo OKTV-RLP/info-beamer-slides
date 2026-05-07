@@ -58,10 +58,26 @@ CONFIG       = "config.json"
 SLIDE_GRACE_SECONDS = 3600
 
 # Pro Filename: Unix-Timestamp, ab dem das File geloescht werden darf.
-# Wird beim ersten Erkennen als "nicht mehr in Playlist" gesetzt und
+# Wird beim Uebergang "Playlist -> nicht mehr in Playlist" gesetzt und
 # beim Zurueckkehren in die Playlist wieder entfernt. Modul-globaler
 # State, damit er ueber main()-Iterationen hinweg konsistent bleibt.
+#
+# Loesch-Regel im GC: alles im Verzeichnis mit Praefix wird geloescht,
+# ausser es ist in der aktuellen Playlist (keep) ODER im Pending-Dict
+# (Grace). Faellt ein Eintrag nach Grace-Ablauf aus dem Dict, ist die
+# Datei automatisch Loesch-Kandidat im selben GC-Lauf — kein expliziter
+# Loesch-Schritt im Grace-Pfad noetig.
 _pending_deletions = {}
+
+# Letzter gesehener keep-Set, um in einem GC-Lauf die diesmal
+# *frisch* aus der Playlist gefallenen Files zu erkennen
+# (_previous_keep - keep). Nur fuer diese Files wird die Grace-Periode
+# gestartet — alle anderen Files ohne keep- und ohne Pending-Schutz
+# sind Loesch-Kandidaten. None auf dem ersten GC-Lauf nach Sidecar-
+# Start: dann gracen wir defensiv alle bereits liegenden Waisen
+# einmalig (Sidecar-Restart darf keine Lua-Live-Folien killen, deren
+# Manifest-Stand vor dem Restart aktiv war).
+_previous_keep = None
 
 # UDP-IPC zu info-beamer auf dem Standard-Port. Wird fuer das Push
 # des Zeit-Texts an den Lua-Knoten verwendet, statt eine Datei auf
@@ -497,6 +513,100 @@ def sleep_with_time_ticks(total_seconds):
         time.sleep(min(1.0, max(0.1, remaining)))
 
 
+def cache_gc(keep):
+    """Cache-GC mit Grace-Period.
+
+    Loesch-Regel: alle Files mit SLIDE_PREFIX, die NICHT in 'keep' und
+    NICHT in '_pending_deletions' enthalten sind. .tmp-Reste werden
+    immer sofort geloescht (sind nie Teil einer aktiven Playlist).
+
+    Grace-Period: nur fuer Files, die in diesem GC-Lauf *frisch* aus der
+    Playlist gefallen sind (_previous_keep − keep), wird die Grace
+    gestartet. Files mit abgelaufener Grace fallen aus dem Pending-Dict
+    und sind damit im selben Lauf Loesch-Kandidat — kein expliziter
+    Loesch-Schritt im Grace-Pfad noetig.
+
+    Erster Lauf nach Sidecar-Start (_previous_keep is None): alle
+    bereits liegenden Waisen bekommen defensiv eine Grace, damit ein
+    Restart waehrend laufender Lua-Wiedergabe nicht die noch
+    benoetigten Folien-Files killt (Sliding-Window haelt nur SLIDE_
+    WINDOW Texturen vor; Folien jenseits davon muessen vom Disk
+    nachgeladen werden koennen)."""
+    global _previous_keep
+
+    now_ts = time.time()
+
+    # Disk scannen — Praefix-Filter schuetzt Knoten-eigene Dateien
+    # (node.lua, node.json, empty.png, ...) vor versehentlicher
+    # Loeschung.
+    seen_files = set()
+    tmp_files  = set()
+    try:
+        for fname in os.listdir("."):
+            if not fname.startswith(SLIDE_PREFIX):
+                continue
+            if fname.endswith(".tmp"):
+                tmp_files.add(fname)
+            else:
+                seen_files.add(fname)
+    except OSError as e:
+        log("Cache-GC: listdir fehlgeschlagen: %s" % e)
+        return
+
+    # Phase 1: frisch aus der Playlist gefallene Files in Grace
+    # ueberfuehren. Beim ersten Lauf nach Restart konservativ alle
+    # liegenden Waisen einbeziehen.
+    if _previous_keep is None:
+        newly_orphaned = seen_files - keep
+    else:
+        newly_orphaned = (_previous_keep - keep) & seen_files
+    for fname in newly_orphaned:
+        if fname not in _pending_deletions:
+            _pending_deletions[fname] = now_ts + SLIDE_GRACE_SECONDS
+    _previous_keep = set(keep)
+
+    # Phase 2: Pending-Eintraege bereinigen.
+    #   - File ist wieder in der Playlist        → Schutz aufheben.
+    #   - Grace-Periode abgelaufen               → Schutz aufheben
+    #     (Loeschung uebernimmt Phase 3 im selben Lauf).
+    #   - File existiert nicht mehr auf Disk     → toter Eintrag.
+    for fname in list(_pending_deletions):
+        if fname in keep:
+            del _pending_deletions[fname]
+        elif fname not in seen_files:
+            del _pending_deletions[fname]
+        elif now_ts >= _pending_deletions[fname]:
+            del _pending_deletions[fname]
+
+    # Phase 3: Loesch-Pass. Strikte Regel: alles loeschen, was nicht
+    # durch keep oder _pending_deletions geschuetzt ist. Bei OSError
+    # bleibt das File liegen; der naechste GC-Lauf versucht es
+    # sofort wieder (kein erneutes Grace, weil _previous_keep das
+    # File jetzt nicht mehr enthaelt → es ist nicht "frisch
+    # rausgefallen").
+    removed = 0
+    for fname in tmp_files:
+        try:
+            os.remove(fname)
+            removed += 1
+        except OSError:
+            pass
+
+    for fname in seen_files:
+        if fname in keep:
+            continue
+        if fname in _pending_deletions:
+            continue
+        try:
+            os.remove(fname)
+            removed += 1
+        except OSError as e:
+            log("Cache-Loeschung fehlgeschlagen: %s (%s)" % (fname, e))
+
+    if removed:
+        log("Cache aufgeraeumt: %d Datei(en) entfernt." % removed)
+
+
 def main():
     last_manifest_hash = None
 
@@ -610,80 +720,11 @@ def main():
                     log("Folie-Download fehlgeschlagen %s (%s): %s" %
                         (entry["name"], download_url, e))
 
-            # Cache aufraeumen: entferne nur Files mit unserem Praefix,
-            # die nicht mehr in der aktuellen Playlist sind, sowie
-            # .tmp-Reste aus abgebrochenen Downloads. Knoten-eigene
-            # Dateien (node.lua, node.json, empty.png, ...) werden durch
-            # die Praefix-Pruefung verschont. Laeuft nur nach
-            # erfolgreichem Playlist-Fetch (HTTP-Fehler springen vorher
-            # per `continue`), daher kein versehentlicher Komplett-Wipe
-            # wegen Netzproblem.
-            #
-            # Grace-Period: Files, die aus der Playlist gefallen sind,
-            # werden NICHT sofort geloescht (s. SLIDE_GRACE_SECONDS am
-            # Modulkopf). Stattdessen wird beim ersten Erkennen ein
-            # delete_at-Timestamp gesetzt; geloescht wird erst, wenn
-            # dieser ueberschritten ist. Files, die zwischenzeitlich
-            # wieder in die Playlist zurueckkehren, werden aus dem
-            # Pending-Dict entfernt. .tmp-Reste werden weiterhin sofort
-            # entfernt — die sind nie Teil einer aktiven Playlist.
+            # Cache aufraeumen. Laeuft nur nach erfolgreichem Playlist-
+            # Fetch (HTTP-Fehler springen vorher per `continue`), daher
+            # kein versehentlicher Komplett-Wipe wegen Netzproblem.
             keep = set(slide_filename(e["name"]) for e in entries)
-            now_ts = time.time()
-            removed = 0
-            seen_files = set()
-            try:
-                for fname in os.listdir("."):
-                    if not fname.startswith(SLIDE_PREFIX):
-                        continue
-                    seen_files.add(fname)
-
-                    if fname.endswith(".tmp"):
-                        try:
-                            os.remove(fname)
-                            removed += 1
-                        except OSError:
-                            pass
-                        continue
-
-                    if fname in keep:
-                        if fname in _pending_deletions:
-                            del _pending_deletions[fname]
-                        continue
-
-                    delete_at = _pending_deletions.get(fname)
-                    if delete_at is None:
-                        _pending_deletions[fname] = now_ts + SLIDE_GRACE_SECONDS
-                    elif now_ts >= delete_at:
-                        # Pending-Eintrag erst NACH erfolgreichem Remove
-                        # entfernen. Bleibt der OSError persistent (z. B.
-                        # Permission-Issue), wuerde ein Pop-on-Failure den
-                        # Eintrag fallen lassen, womit der naechste Tick
-                        # via "delete_at is None" eine frische Grace-
-                        # Periode startet — der Loesch-Versuch wird damit
-                        # bis zu eine Stunde aufgeschoben statt zeitnah
-                        # wiederholt. Bei Erfolg pop, bei Fehler:
-                        # delete_at unveraendert lassen → naechster Tick
-                        # versucht es sofort wieder.
-                        try:
-                            os.remove(fname)
-                            removed += 1
-                            _pending_deletions.pop(fname, None)
-                        except OSError as e:
-                            log("Cache-Loeschung fehlgeschlagen: %s (%s)" %
-                                (fname, e))
-            except OSError as e:
-                log("Cache-GC fehlgeschlagen: %s" % e)
-
-            # Pending-Eintraege fuer Files, die nicht mehr auf Disk
-            # existieren (manuell entfernt, FS-Fehler), aufraeumen —
-            # sonst wuechse das Dict unbegrenzt bei haeufig wechselnden
-            # Playlists.
-            for fname in list(_pending_deletions):
-                if fname not in seen_files:
-                    del _pending_deletions[fname]
-
-            if removed:
-                log("Cache aufgeraeumt: %d Datei(en) entfernt." % removed)
+            cache_gc(keep)
 
             available = [
                 e for e in entries
