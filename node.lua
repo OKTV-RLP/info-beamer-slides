@@ -1970,9 +1970,28 @@ function node.render()
         else
             current_idx = current_idx + 1
         end
-        slide_started = t
         cur           = slides[current_idx]
-        elapsed       = 0
+        -- Bei aktivem Cycle-Fade-In (image-Outgoing, sichtbarer
+        -- Cross-Fade ueber fade_dur Sekunden) startet die Lifetime-
+        -- Uhr der neuen Folie erst NACH dem Fade-In. Sonst wuerden
+        -- bei Folien mit duration < 2*fade_dur (insbesondere
+        -- duration=0) Cycle-Fade-In und Out-Fade vollstaendig
+        -- ueberlappen — der Cycle-Fade setzt slide_drawn=true und
+        -- blockiert den Out-Fade-Branch im selben Zeitfenster. Bei
+        -- elapsed=fade_dur faellt dann sofort der Advance, und die
+        -- Folie wuerde als Hard-Cut zur naechsten gewechselt, ohne
+        -- jemals einen Out-Fade gerendert zu haben. Mit dem Shift
+        -- ist der Out-Fade-Branch im Anschluss an den Cycle-Fade
+        -- garantiert sichtbar — Invariante "jede Folie zeigt ihre
+        -- eingehende UND ausgehende Transition" gilt damit auch
+        -- ueber Wrap-Around-Grenzen hinweg, an jeder Position.
+        if outgoing and outgoing.kind == "image" and fade_dur > 0 then
+            slide_started = t + fade_dur
+            elapsed       = -fade_dur
+        else
+            slide_started = t
+            elapsed       = 0
+        end
         -- Window-Reconcile passiert am Frame-Ende, NACH dem Render.
         -- Grund: der Slide-Wechsel-Hook (s. unten) kann last_cur.res
         -- in pending_image_hold_res einhaengen (1-Frame-Hold beim
