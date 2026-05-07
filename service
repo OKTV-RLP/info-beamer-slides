@@ -654,12 +654,23 @@ def main():
                     if delete_at is None:
                         _pending_deletions[fname] = now_ts + SLIDE_GRACE_SECONDS
                     elif now_ts >= delete_at:
+                        # Pending-Eintrag erst NACH erfolgreichem Remove
+                        # entfernen. Bleibt der OSError persistent (z. B.
+                        # Permission-Issue), wuerde ein Pop-on-Failure den
+                        # Eintrag fallen lassen, womit der naechste Tick
+                        # via "delete_at is None" eine frische Grace-
+                        # Periode startet — der Loesch-Versuch wird damit
+                        # bis zu eine Stunde aufgeschoben statt zeitnah
+                        # wiederholt. Bei Erfolg pop, bei Fehler:
+                        # delete_at unveraendert lassen → naechster Tick
+                        # versucht es sofort wieder.
                         try:
                             os.remove(fname)
                             removed += 1
-                        except OSError:
-                            pass
-                        _pending_deletions.pop(fname, None)
+                            _pending_deletions.pop(fname, None)
+                        except OSError as e:
+                            log("Cache-Loeschung fehlgeschlagen: %s (%s)" %
+                                (fname, e))
             except OSError as e:
                 log("Cache-GC fehlgeschlagen: %s" % e)
 
