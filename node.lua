@@ -365,6 +365,267 @@ local function dispose_list(list)
     end
 end
 
+-- Sliding-Window fuer Image-Slide-Preload. Auf Pi 3B (256 MiB CMA) hat
+-- jede 1920x1080-RGBA-Textur ~8 MB GPU-RAM Footprint; lange Playlists
+-- vollstaendig vorzuladen sprengt das CMA und triggert "Cannot alloc
+-- texture: out of memory" mit Watchdog-Reboot. Stattdessen: nur
+-- current_idx + (SLIDE_WINDOW-1) Folgefolien als Texturen halten, der
+-- Rest bleibt Metadaten-only. Reconcile laeuft am Frame-Ende.
+--
+-- Das Window ist zyklisch: am Playlist-Ende wrappt es zu slides[1]
+-- zurueck, sodass am letzten Slide schon der naechste Cycle-Wrap-
+-- Target im Vorrat liegt. Ohne Wrap-Around muesste slides[1] am
+-- Cycle-Ende per Transition-Gate "kalt" geladen werden — das wuerde
+-- nicht nur einen sichtbaren Delay produzieren, sondern auch die
+-- Sequentialitaets-Garantie brechen, weil ein ausserhalb des
+-- linearen Windows gestarteter Decode von any_image_in_flight()
+-- nicht gesehen wuerde und reconcile_window-Phase 2 parallel
+-- pending_slides[1] anstossen koennte.
+--
+-- Window-Groesse 5: deckt sicher auch laengere Ketten kurzer
+-- Slide-Dauern ab (Transition-Gate verzoegert ohnehin, falls die
+-- Naechste noch nicht ready ist; das Window dient als Vorrat).
+-- Peak-GPU-Footprint bleibt mit 5 × 8 MB = 40 MB weit unter dem
+-- CMA-Budget.
+local SLIDE_WINDOW = 5
+
+-- Liefert die zyklischen Indizes des aktuellen Sliding-Windows.
+-- Bei n < SLIDE_WINDOW wird nur n-mal iteriert (kein doppelter
+-- Slot). Reihenfolge: current_idx zuerst, dann monoton steigend
+-- mit Wrap-Around.
+local function window_indices(start_idx, n)
+    local count = math.min(SLIDE_WINDOW, n)
+    local start = math.max(1, start_idx or 1)
+    local indices = {}
+    for i = 0, count - 1 do
+        indices[i + 1] = ((start - 1 + i) % n) + 1
+    end
+    return indices
+end
+
+-- Image-Resource eines Slots freigeben, mit Outgoing-Handoff:
+-- wenn die Resource gerade vom Cycle-Crossfade als outgoing
+-- referenziert wird, uebernimmt set_outgoing/swap_slides die
+-- Disposal-Verantwortung — wir markieren nur dispose_after, sonst
+-- wuerde der noch laufende Cycle-Fade ploetzlich auf eine disposede
+-- Textur zeichnen. Wird aus image_ready (Error-Branch) und
+-- unload_slot genutzt.
+local function dispose_slot_resource(slot)
+    if not slot or not slot.res then return end
+    if outgoing and outgoing.res == slot.res then
+        outgoing.dispose_after = true
+    else
+        pcall(function() slot.res:dispose() end)
+    end
+    slot.res = nil
+end
+
+-- Image-Resource ist draw-ready, sobald der async Decoder fertig ist.
+-- info-beamer 2.x liefert :state() == "loaded" fuer Image-Resources;
+-- als Fallback (aeltere Builds, fehlende Methode) prueft :size() — eine
+-- nicht dekodierte Textur meldet 0x0. Bei Lade-Fehlern (slot.failed)
+-- gilt der Slot als "ready", damit der Render-Loop ueber kaputte
+-- Folien nicht endlos haengt — draw_fit(nil) faellt dann auf reines
+-- BG zurueck.
+--
+-- :state() == "error" (Decode-Fehler nach erfolgreichem Load-Aufruf,
+-- z.B. korrupte Datei, unsupported PNG-Variante) markiert den Slot
+-- als failed, gibt die GPU-Resource sofort frei (sonst weiter
+-- belegtes GPU-RAM und Render-Pfade wuerden gegen die kaputte
+-- Textur zeichnen) und liefert true zurueck — andernfalls bliebe der
+-- Slot permanent "not ready" und wuerde den globalen
+-- any_image_in_flight()-Gate dauerhaft blockieren.
+-- Unbekannte States (zukuenftige info-beamer-Versionen, Race-
+-- Conditions) fallen auf den :size()-Heuristik-Pfad zurueck, statt
+-- fix mit false zu antworten.
+local function image_ready(slot)
+    if not slot then return false end
+    if slot.failed then return true end
+    local res = slot.res
+    if not res then return false end
+    local ok, st = pcall(function() return res:state() end)
+    if ok and type(st) == "string" then
+        if st == "loaded" then return true end
+        if st == "error"  then
+            slot.failed = true
+            print("Folie nicht dekodierbar: " .. tostring(slot.file))
+            dispose_slot_resource(slot)
+            return true
+        end
+        if st == "loading" then return false end
+        -- unbekannter State: defensiver Fallback ueber :size()
+    end
+    local ok2, w, h = pcall(function() return res:size() end)
+    return ok2
+       and (tonumber(w) or 0) > 0
+       and (tonumber(h) or 0) > 0
+end
+
+-- Reine Resource-Drawable-Pruefung ohne Slot-Bezug — fuer Stellen,
+-- an denen wir nur ein nacktes resource-Handle haben (z.B.
+-- outgoing.res im Cycle-Crossfade, das nach set_outgoing nicht mehr
+-- mit einem Slot verknuepft ist). Im Gegensatz zu image_ready/
+-- image_drawable: keine Seiteneffekte (kein slot.failed-Setting,
+-- kein dispose). Logik mirror't den loaded/size-Pfad aus image_ready.
+local function resource_drawable(res)
+    if not res then return false end
+    local ok, st = pcall(function() return res:state() end)
+    if ok and type(st) == "string" then
+        return st == "loaded"
+    end
+    local ok2, w, h = pcall(function() return res:size() end)
+    return ok2
+       and (tonumber(w) or 0) > 0
+       and (tonumber(h) or 0) > 0
+end
+
+-- Image-Slot ist konkret zeichenbar: Resource existiert, ist
+-- erfolgreich dekodiert und nicht als failed markiert. Strenger
+-- als image_ready() — letztere liefert aus Gate-Sicht true fuer
+-- failed-Slots, damit der globale In-Flight-Gate nicht permanent
+-- blockt; im Render-Pfad ist diese Sicht falsch, weil ein failed-
+-- Slot keinen halben Crossfade zeigen soll, sondern auf
+-- draw_fit(nil) -> reines BG zurueckfaellt. Wird bei Crossfade-
+-- Entscheidungen genutzt (Cycle-Fade can_fade, Out-Fade-Branch).
+--
+-- Reihenfolge: image_ready ZUERST aufrufen — der Aufruf kann
+-- slot.failed=true setzen und slot.res=nil disposen (state()=="error"-
+-- Branch). Wenn wir failed/res VOR image_ready pruefen, sehen wir
+-- den State VOR dem Uebergang und liefern faelschlich true; das
+-- wuerde draw_crossfade mit nil-Resource aufrufen.
+local function image_drawable(slot)
+    if not slot or slot.kind ~= "image" then return false end
+    if not image_ready(slot) then return false end
+    return slot.res ~= nil and not slot.failed
+end
+
+-- Asynchron einen Image-Slot laden. Idempotent: wiederholte Aufrufe
+-- waehrend des Decodes sind no-ops. Video-Slots sind explizit
+-- ausgenommen — sie laufen ueber fg_video_load (eigener Lifecycle,
+-- nur ein Decoder gleichzeitig auf Pi 3B).
+local function preload_slot(slot)
+    if not slot                    then return end
+    if slot.kind ~= "image"        then return end
+    if slot.res or slot.failed     then return end
+    local ok, res = pcall(resource.load_image, {file = slot.file})
+    if ok and res then
+        slot.res = res
+    else
+        slot.failed = true
+        print("Folie nicht ladbar: " .. tostring(slot.file))
+    end
+end
+
+-- Image-Slot disposen, wenn er aus dem Vorlade-Fenster faellt.
+-- dispose_slot_resource uebernimmt das Outgoing-Handoff fuer
+-- Resources, die gerade vom Cycle-Crossfade gehalten werden.
+local function unload_slot(slot)
+    if not slot or not slot.res    then return end
+    if slot.kind ~= "image"        then return end
+    dispose_slot_resource(slot)
+end
+
+-- Returns true wenn aktuell irgendwo ein Image-Decode in Flight ist
+-- (s.res gesetzt, aber noch nicht "loaded"). Geprueft wird sowohl
+-- das aktuelle (zyklische) slides-Window als auch pending_slides[1]
+-- — beide teilen sich den globalen In-Flight-Gate, damit auf Pi 3B
+-- nie zwei PNG-Decodes parallel laufen.
+local function any_image_in_flight(start_idx)
+    local n = #slides
+    if n == 0 then
+        if pending_slides and pending_slides[1] then
+            local p = pending_slides[1]
+            if p.kind == "image" and p.res and not image_ready(p) then
+                return true
+            end
+        end
+        return false
+    end
+    for _, idx in ipairs(window_indices(start_idx, n)) do
+        local s = slides[idx]
+        if s and s.kind == "image" and s.res and not image_ready(s) then
+            return true
+        end
+    end
+    if pending_slides and pending_slides[1] then
+        local p = pending_slides[1]
+        if p.kind == "image" and p.res and not image_ready(p) then
+            return true
+        end
+    end
+    return false
+end
+
+-- Stellt sicher, dass das zyklische Window geladen ist und alle
+-- anderen Slots disposed. Aufruf am Frame-Ende.
+--
+-- Loads laufen sequenziell: pro Aufruf wird hoechstens EIN neuer
+-- Decode-Task an den Threadpool gegeben, und nur wenn weder im
+-- Window noch in pending_slides[1] ein Decode in Flight ist.
+-- Reihenfolge: aktuelles Window zuerst (sichtbarer Bedarf in
+-- monotoner Slide-Reihenfolge inkl. Wrap-Around), dann
+-- pending_slides[1] (wird erst beim naechsten Cycle-Wrap als
+-- Crossfade-Target gebraucht). Auf Pi 3B verhindert das
+-- Lastpeaks (parallele PNG-Decodes konkurrieren um CPU, RAM und
+-- GEM-Allokationen — derselbe Druck, der den urspruenglichen OOM
+-- ausgeloest hat).
+--
+-- Performance: die Unload-Phase iteriert ueber alle n Slides und
+-- aendert sich nur, wenn sich das Window (start, n) oder die
+-- slides-Liste selbst aendern. Bei langer Playlist und 50 fps
+-- waere O(n) pro Frame unnoetig teuer auf Pi 3B — daher cachen
+-- wir (start, n, slides_id) und ueberspringen die Unload-Phase,
+-- wenn sich nichts geaendert hat. swap_slides invalidiert den
+-- Cache via reconcile_window_invalidate().
+local last_window_start, last_window_n, last_window_id = nil, nil, nil
+
+local function reconcile_window_invalidate()
+    last_window_start, last_window_n, last_window_id = nil, nil, nil
+end
+
+local function reconcile_window(start_idx)
+    local n = #slides
+    if n == 0 then
+        reconcile_window_invalidate()
+        return
+    end
+    local start = math.max(1, start_idx or 1)
+    local indices = window_indices(start, n)
+    if last_window_start ~= start or last_window_n ~= n
+       or last_window_id ~= slides then
+        local in_window = {}
+        for _, idx in ipairs(indices) do in_window[idx] = true end
+        for i = 1, n do
+            if not in_window[i] then
+                unload_slot(slides[i])
+            end
+        end
+        last_window_start, last_window_n, last_window_id = start, n, slides
+    end
+    if any_image_in_flight(start_idx) then return end
+    -- Phase 1: Aktuelles Window auffuellen (sichtbarer Bedarf zuerst,
+    -- in monotoner Slide-Reihenfolge mit Wrap-Around).
+    for _, idx in ipairs(indices) do
+        local s = slides[idx]
+        if s and s.kind == "image" and not s.res and not s.failed then
+            preload_slot(s)
+            return
+        end
+    end
+    -- Phase 2: pending_slides[1] vorladen — wird beim naechsten
+    -- Cycle-Wrap als Crossfade-Target gebraucht (nur wenn ein
+    -- Manifest-Update aktiv ist; sonst greift der Wrap-Around des
+    -- aktiven Windows). Erst hier, weil der aktuelle Bedarf Vorrang
+    -- hat. Slot 2..N von pending werden erst nach dem Swap durch
+    -- reconcile in Folgeframes nachgezogen.
+    if pending_slides and pending_slides[1] then
+        local p = pending_slides[1]
+        if p.kind == "image" and not p.res and not p.failed then
+            preload_slot(p)
+        end
+    end
+end
+
 -- Dezibel → linearer Faktor [0..1] für info-beamers :volume()-API.
 -- 0 dB = 1.0 (unity), -6 dB ≈ 0.5 (halbe Amplitude), -20 dB = 0.1.
 -- Werte ≤ -60 dB auf 0 clampen (praktisch stumm), Werte ≥ 0 dB auf
@@ -979,6 +1240,9 @@ local function swap_slides(new_list)
             end
         end
     end
+    -- slides-Identitaet hat sich geaendert: reconcile_window-Cache
+    -- invalidieren, damit die naechste Unload-Phase wieder laeuft.
+    reconcile_window_invalidate()
 end
 
 ------------------------------------------------------------
@@ -1326,11 +1590,13 @@ util.json_watch("manifest.json", function(m)
         return
     end
 
-    -- Folien laden. Image-Slides werden sofort als GL-Texturen geladen
-    -- (preload), Video-Slides nur als Metadaten — die Resource entsteht
-    -- erst beim Eintritt in die Folie via fg_video_load (Lazy-Load,
-    -- weil Pi 3B nur einen Decoder hat und mehrere Videos parallel
-    -- nicht haltbar waeren).
+    -- Folien laden. Sowohl Image- als auch Video-Slides entstehen hier
+    -- nur als Metadaten — Image-Texturen werden via reconcile_window /
+    -- preload_slot bedarfsgerecht im Sliding-Window von SLIDE_WINDOW
+    -- Folien gehalten, Video-Resources entstehen erst beim Eintritt in
+    -- die Folie via fg_video_load (auf Pi 3B nur ein HW-Decoder).
+    -- Lange Playlists wuerden sonst das CMA-Budget sprengen
+    -- ("Cannot alloc texture: out of memory" -> Watchdog-Reboot).
     local loaded = {}
     for _, e in ipairs(entries) do
         if e.file then
@@ -1345,17 +1611,13 @@ util.json_watch("manifest.json", function(m)
                     res      = nil,
                 }
             else
-                local ok, res = pcall(resource.load_image, {file = e.file})
-                if ok and res then
-                    loaded[#loaded + 1] = {
-                        file     = e.file,
-                        kind     = "image",
-                        duration = tonumber(e.duration) or CONFIG.default_duration,
-                        res      = res,
-                    }
-                else
-                    print("Folie nicht ladbar: " .. tostring(e.file))
-                end
+                loaded[#loaded + 1] = {
+                    file     = e.file,
+                    kind     = "image",
+                    duration = tonumber(e.duration) or CONFIG.default_duration,
+                    res      = nil,
+                    failed   = false,
+                }
             end
         end
     end
@@ -1365,9 +1627,16 @@ util.json_watch("manifest.json", function(m)
     dispose_list(pending_slides)
     pending_slides = loaded
 
+    -- Kein eager Preload — reconcile_window triggert pending[1]
+    -- erst, wenn das aktuelle Window settled ist (kein In-Flight
+    -- Decode). Damit bleibt die Sequentialitaets-Garantie auch ueber
+    -- Manifest-Updates hinweg erhalten.
+
     if state == STATE_IDLE then
         -- Sofort einsetzen — kein laufender Zyklus, von dem wir
-        -- ausfaden müssten.
+        -- ausfaden müssten. Renderer faellt waehrend des Decodes von
+        -- Slot 1 kurzzeitig auf BG+Overlay zurueck (draw_fit ignoriert
+        -- nil-Resources), das ist visuell sauberer als ein Sync-Wait.
         local old = slides
         slides = pending_slides
         pending_slides = nil
@@ -1375,9 +1644,12 @@ util.json_watch("manifest.json", function(m)
         current_idx   = 1
         slide_started = now()
         state = STATE_PLAYING
+        reconcile_window(current_idx)
     end
     -- Sonst: bleibt als pending; Renderer swappt am Zyklus-Ende mit
-    -- Crossfade.
+    -- Crossfade. pending[1] wird durch das End-of-Frame-
+    -- reconcile_window vorgeladen (sequentialisiert mit dem aktuellen
+    -- slides-Window).
 end)
 
 ------------------------------------------------------------
@@ -1623,7 +1895,53 @@ function node.render()
         end
     else
         local cur_dur = math.max(cur.duration, fade_dur)
-        should_advance = (elapsed >= cur_dur)
+        if elapsed >= cur_dur then
+            -- Transition-Gate: die naechste Image-Folie muss
+            -- draw-ready sein, sonst greift der nachfolgende
+            -- Cycle-/Slide-Crossfade auf eine noch nicht dekodierte
+            -- Textur. preload_slot/reconcile_window sollten den Slot
+            -- laengst angetriggert haben — die folgenden Defensiv-
+            -- Aufrufe sichern lediglich gegen pathologisch kurze
+            -- Slide-Dauern (cur.duration < Decode-Zeit) am
+            -- Window-Rand und beim Manifest-Wrap. Bei nicht-fertigem
+            -- Slot bleibt cur stehen, bis ready — visuell sieht der
+            -- Zuschauer nur eine minimal verlaengerte Standzeit der
+            -- aktuellen Folie.
+            local nxt_slot
+            if current_idx >= #slides then
+                nxt_slot = (pending_slides and pending_slides[1])
+                           or slides[1]
+            else
+                nxt_slot = slides[current_idx + 1]
+            end
+            if nxt_slot and nxt_slot.kind == "image"
+               and not image_ready(nxt_slot) then
+                -- Preload-Trigger nur, wenn aktuell kein anderer
+                -- Decode in Flight ist — sonst wuerde dieser Render-
+                -- Loop-Pfad den globalen Sequentialisierungs-Gate
+                -- aushebeln und einen zweiten parallelen Decode
+                -- starten. Im Normalfall hat reconcile_window den
+                -- Slot ohnehin laengst angetriggert; das hier ist
+                -- nur Sicherung gegen pathologisch kurze Standzeiten,
+                -- bei denen der Wechsel schneller kommt als der
+                -- naechste reconcile-Tick. Bei laufendem Decode
+                -- einfach defern — der naechste Frame prueft
+                -- erneut.
+                if not any_image_in_flight(current_idx) then
+                    preload_slot(nxt_slot)
+                end
+                should_advance = false
+                -- elapsed am Advance-Schwellwert klemmen, damit der
+                -- naechste Frame sofort wieder prueft, ohne dass
+                -- elapsed weit ueber cur_dur hinauslaeuft (sonst
+                -- spaeter sichtbarer Sprung im Out-Fade).
+                slide_started = t - cur_dur
+            else
+                should_advance = true
+            end
+        else
+            should_advance = false
+        end
     end
 
     -- Advance ZUERST. Beim Zyklus-Ende setzt das outgoing — der
@@ -1655,6 +1973,12 @@ function node.render()
         slide_started = t
         cur           = slides[current_idx]
         elapsed       = 0
+        -- Window-Reconcile passiert am Frame-Ende, NACH dem Render.
+        -- Grund: der Slide-Wechsel-Hook (s. unten) kann last_cur.res
+        -- in pending_image_hold_res einhaengen (1-Frame-Hold beim
+        -- Image+BG-Video -> FG-Video-Wechsel), und der Hold wird im
+        -- selben Frame gerendert. Wuerde reconcile hier laufen,
+        -- wuerde es last_cur disposen, bevor der Hold-Frame zeichnet.
     end
 
     -- Slide-Wechsel-Hook: Video-Folien benoetigen explizite Decoder-
@@ -1779,7 +2103,22 @@ function node.render()
             local slide_drawn = false
             if outgoing then
                 local cycle_elapsed = t - cycle_fade_start
-                local can_fade = (outgoing.kind == "image")
+                -- Cycle-Fade nur, wenn BEIDE Resourcen konkret
+                -- zeichenbar sind:
+                --   outgoing.res via resource_drawable (kein Slot-
+                --     Bezug mehr nach set_outgoing — bei sehr kurzen
+                --     Slide-Dauern kann ein Slot mit res im
+                --     "loading"-State outgoing geworden sein, weil
+                --     should_advance den State von cur nicht prueft);
+                --   slides[current_idx] via image_drawable (verlangt
+                --     non-nil + not failed; image_ready allein wuerde
+                --     failed-Slots als ready behandeln und
+                --     draw_crossfade mit nil-cur.res aufrufen, was
+                --     slide_drawn=true setzt und den Fallback-Draw
+                --     blockiert).
+                local can_fade = outgoing.kind == "image"
+                                 and resource_drawable(outgoing.res)
+                                 and image_drawable(slides[current_idx])
                 if can_fade and fade_dur > 0 and cycle_elapsed < fade_dur then
                     local progress = cycle_elapsed / fade_dur
                     draw_crossfade(outgoing.res, cur.res, progress)
@@ -1793,7 +2132,15 @@ function node.render()
                 local cur_dur = math.max(cur.duration, fade_dur)
                 local fade_at = cur_dur - fade_dur
                 local nxt     = slides[current_idx + 1]
-                if nxt and nxt.kind == "image"
+                -- Out-Fade nur starten, wenn beide Folien konkret
+                -- zeichenbar sind. image_drawable schlaegt failed-
+                -- Slots aus (sonst draw_crossfade mit nil-Resource —
+                -- waere effektiv ein verschluckter Fade ohne
+                -- Fallback-Draw). Bei nicht-zeichenbarem nxt steht
+                -- cur ueber das Advance-Gate ohnehin laenger; bei
+                -- nicht-zeichenbarem cur (failed-Slide) zeigt
+                -- draw_fit(cur.res=nil) reines BG fuer cur_dur.
+                if image_drawable(cur) and image_drawable(nxt)
                    and fade_dur > 0 and elapsed >= fade_at
                    and current_idx < #slides then
                     local progress = math.min(1, (elapsed - fade_at) / fade_dur)
@@ -1821,4 +2168,14 @@ function node.render()
     -- ein Frame Latenz zwischen visuellem Wechsel auf den FG-Layer und
     -- Beginn der Pegelabsenkung.
     apply_audio_levels()
+
+    -- Sliding-Window am Frame-Ende abgleichen. Ab hier wird im Frame
+    -- nichts mehr aus slides[i].res gelesen, also koennen Slots
+    -- ausserhalb von [current_idx, current_idx + SLIDE_WINDOW - 1]
+    -- gefahrlos disposed werden. preload_slot fuer die naechsten
+    -- Folien laeuft async (Decode im Worker), bis zum naechsten
+    -- Frame typisch fertig.
+    if state == STATE_PLAYING then
+        reconcile_window(current_idx)
+    end
 end
