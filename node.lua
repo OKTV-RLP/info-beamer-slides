@@ -1985,9 +1985,18 @@ function node.render()
         -- garantiert sichtbar — Invariante "jede Folie zeigt ihre
         -- eingehende UND ausgehende Transition" gilt damit auch
         -- ueber Wrap-Around-Grenzen hinweg, an jeder Position.
+        --
+        -- Zeitbasis fuer den Shift ist cycle_fade_start (gesetzt in
+        -- set_outgoing, das Frames-genaue Ende des Cycle-Fades),
+        -- nicht t — t wird am Frame-Start gemessen, cycle_fade_start
+        -- per now() innerhalb set_outgoing (Mikrosekunden spaeter).
+        -- Ohne diese Ausrichtung wuerde slide_started einige
+        -- Mikrosekunden VOR dem Cycle-Fade-Ende liegen, bei
+        -- duration=0 wuerde der Out-Fade dann nicht exakt bei
+        -- progress=0 anlaufen.
         if outgoing and outgoing.kind == "image" and fade_dur > 0 then
-            slide_started = t + fade_dur
-            elapsed       = -fade_dur
+            slide_started = cycle_fade_start + fade_dur
+            elapsed       = t - slide_started
         else
             slide_started = t
             elapsed       = 0
