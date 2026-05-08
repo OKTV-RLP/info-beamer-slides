@@ -195,11 +195,20 @@ def parse_playlist(text, default_dur):
         elif line and not line.startswith("#"):
             name = basename_from_entry(line)
             if name:
-                entries.append({
-                    "name":     name,
-                    "url":      line,
-                    "duration": duration,
-                })
+                # Format-Allowlist: Eintraege mit nicht unterstuetzter
+                # Endung werden verworfen (statt sie ins Manifest zu
+                # uebernehmen und in Lua am resource.load_image/_video
+                # scheitern zu lassen). Log-Hinweis pro Eintrag, damit
+                # Ablieferer eine eindeutige Spur haben.
+                if media_type(name) is None:
+                    log("Playlist-Eintrag uebersprungen "
+                        "(Format nicht unterstuetzt): %s" % line)
+                else:
+                    entries.append({
+                        "name":     name,
+                        "url":      line,
+                        "duration": duration,
+                    })
             duration = default_dur
     return entries
 
@@ -208,30 +217,50 @@ def slide_filename(name):
     return SLIDE_PREFIX + name
 
 
-# Endungen, die als Video-Container interpretiert werden. Bewusst
-# konservativ: info-beamer dokumentiert nur MP4 als unterstuetzten
-# Container fuer resource.load_video; m4v ist derselbe Container mit
-# anderem Suffix; mov teilt das ISO-BMFF-Boxen-Layout und wird vom
-# MMAL-Demuxer in der Praxis akzeptiert. webm/mkv/avi sind in der
-# info-beamer-Doku nirgendwo als unterstuetzt aufgefuehrt — Dateien
-# mit diesen Endungen werden hier daher als "image" durchgereicht und
-# wuerden in node.lua am resource.load_image scheitern (saubere
-# Fehlermeldung statt undefiniertem Verhalten beim Video-Decode).
+# Allowlists fuer unterstuetzte Folien-Formate.
+#
+# IMAGE_EXTENSIONS: Endungen, die info-beamer ueber resource.load_image
+# zuverlaessig dekodiert. Beschraenkung auf PNG und JPEG ist bewusst
+# eng — andere Formate (BMP, GIF, WebP, TIFF) sind je nach
+# info-beamer-Build entweder gar nicht unterstuetzt oder schlagen beim
+# Decode mit unklarer Fehlermeldung fehl.
+#
+# VIDEO_EXTENSIONS: Endungen, die als Video-Container interpretiert
+# werden. Bewusst konservativ: info-beamer dokumentiert nur MP4 als
+# unterstuetzten Container fuer resource.load_video; m4v ist derselbe
+# Container mit anderem Suffix; mov teilt das ISO-BMFF-Boxen-Layout
+# und wird vom MMAL-Demuxer in der Praxis akzeptiert. webm/mkv/avi
+# sind in der info-beamer-Doku nirgendwo als unterstuetzt aufgefuehrt.
 # Codec-Erwartung: H.264 fuer alle Pi-Versionen mit Hardware-Decoder;
 # HEVC nur Pi 4+ ab info-beamer hosted v10. Abweichende Codecs in den
 # zugelassenen Containern (z. B. HEVC-MP4 auf Pi 3) schlagen beim
 # Decode-Versuch fehl — das ist Sache des Ablieferers.
-# Identische Liste wie media_type_for in node.lua.
+# Identische Video-Liste wie media_type_for in node.lua.
+#
+# Eintraege in der Playlist mit nicht aufgefuehrten Endungen werden
+# in parse_playlist verworfen (mit Log-Hinweis), bevor sie ins
+# Manifest gelangen. Damit sieht node.lua nur Files mit zugesicherten
+# Formaten.
+IMAGE_EXTENSIONS = ("png", "jpg", "jpeg")
 VIDEO_EXTENSIONS = ("mp4", "m4v", "mov")
 
 
 def media_type(name):
+    """Liefert "image" / "video" / None.
+
+    None signalisiert, dass das Format weder in IMAGE_EXTENSIONS noch
+    in VIDEO_EXTENSIONS gelistet ist und vom info-beamer-Renderer
+    nicht zuverlaessig dekodierbar ist. parse_playlist nutzt das, um
+    den Eintrag zu verwerfen — das Manifest enthaelt damit nur
+    Eintraege mit gueltigem media_type."""
     if "." not in name:
-        return "image"
+        return None
     ext = name.rsplit(".", 1)[-1].lower()
+    if ext in IMAGE_EXTENSIONS:
+        return "image"
     if ext in VIDEO_EXTENSIONS:
         return "video"
-    return "image"
+    return None
 
 
 def write_manifest(entries):
