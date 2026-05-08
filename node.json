@@ -74,7 +74,7 @@
                 "video"
             ],
             "default": "empty.png",
-            "hint": "Wird angezeigt, wenn die Playlist nicht geladen werden kann oder leer ist. Bilder funktionieren auf jedem Pi; Video-Loops in H.264 sind ab Pi 3 hardware-beschleunigt (Pi 5: H.264 in Software), HEVC ab Pi 4+."
+            "hint": "Wird angezeigt, wenn die Playlist nicht geladen werden kann oder leer ist. Bilder funktionieren auf jedem Pi; H.264-Video läuft auf jedem von info-beamer hosted unterstützten Pi (Pi 3 bis Pi 4 / CM4 hardware-beschleunigt, Pi 5 in Software). HEVC ab Pi 4+."
         },
         {
             "title": "Hintergrund-Inhalt (Bild oder Video, optional)",
@@ -85,7 +85,7 @@
                 "video"
             ],
             "default": "empty.png",
-            "hint": "Bild oder MP4-Loop hinter den Folien. Bilder funktionieren auf jedem Pi; Video-Loops in H.264 sind ab Pi 3 hardware-beschleunigt (Pi 5: H.264 in Software), HEVC ab Pi 4+. Transparente PNG-Folien lassen den Hintergrund durchscheinen."
+            "hint": "Bild oder MP4-Loop hinter den Folien. Bilder funktionieren auf jedem Pi; H.264-Video läuft auf jedem von info-beamer hosted unterstützten Pi (Pi 3 bis Pi 4 / CM4 hardware-beschleunigt, Pi 5 in Software). HEVC ab Pi 4+. Transparente PNG-Folien lassen den Hintergrund durchscheinen."
         },
         {
             "title": "Zeit-Overlay",

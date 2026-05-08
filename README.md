@@ -205,12 +205,20 @@ Bildschirm gestreckt — bei abweichendem Seitenverhältnis verzerrt es,
 also in nativer Display-Auflösung (z. B. 1920×1080) liefern.
 
 **Video-Loop:** wird mit `raw = true` in die GL-Pipeline geladen, damit
-es sich mit anderen Layern mischen lässt. Codec-Unterstützung pro Pi:
+es sich mit anderen Layern mischen lässt. Codec-Unterstützung auf den
+von info-beamer hosted unterstützten Pi-Modellen:
 
-- Pi 3 / 3B / 3B+ / Zero 2 W / Pi 4 / CM4: H.264 hardware-beschleunigt
-- Pi 4+ zusätzlich HEVC hardware-beschleunigt (info-beamer hosted v10+)
-- Pi 5: H.264 in Software (kein HW-Decoder mehr in der VPU); funktioniert,
-  kostet aber spürbar mehr CPU. HEVC bleibt HW.
+- Pi 3 / 3B / 3B+ / Zero 2 W / Pi 4 / CM4 (VideoCore IV/VI):
+  H.264 hardware-beschleunigt.
+- Pi 4 / CM4 zusätzlich HEVC hardware-beschleunigt
+  (info-beamer hosted ≥ v10).
+- Pi 5 (VideoCore VII): H.264 in Software (kein HW-Decoder mehr in der
+  VPU) — funktioniert, kostet aber spürbar mehr CPU. HEVC bleibt
+  hardware-beschleunigt.
+
+Hardware-H.264 ist seit Pi 1 (VideoCore IV) Standard; Pi 1 / 2 /
+Zero (V1) werden von info-beamer hosted aktuell aber nicht mehr
+unterstützt.
 
 Pi 3 / 3B / Zero 2 W haben nur **einen** H.264-Hardware-Decoder-Slot.
 Während eine Vordergrund-Video-Folie spielt, wird ein konfiguriertes
@@ -468,8 +476,9 @@ Sekunde):
   gleicher Inhalt).
 - Folien in einem unterstützten Format: PNG/JPEG für Bilder, MP4/M4V/MOV
   für Videos (siehe *Folien-Format-Allowlist*).
-- Für H.264-Video: alle aktuellen Pis (Pi 3, 3B, 3B+, Zero 2 W, Pi 4,
-  CM4 mit HW-Decoder; Pi 5 in Software). HEVC ab Pi 4+.
+- Für H.264-Video: jeder von info-beamer hosted unterstützte Pi
+  (Pi 3 bis Pi 4 / CM4 hardware-beschleunigt, Pi 5 in Software). HEVC
+  ab Pi 4+.
 - Für Audio-Stream: Pi-Build mit `sys.provides("audio")`.
 
 ## Playlist-Format und Adressierung
@@ -526,10 +535,13 @@ Einträge mit anderen Endungen (`.webm`, `.mkv`, `.avi`, `.bmp`, `.gif`,
 Renderer ausschließlich Folien mit zugesicherter Decoder-Unterstützung
 — kein "im Zweifel als Bild durchgereicht und scheitert spät".
 
-Codec-seitig erwartet info-beamer für Videos H.264 (Pi 3+) bzw.
-HEVC (Pi 4+). Abweichende Codecs in den zugelassenen Containern
-(z. B. HEVC-MP4 auf Pi 3) schlagen erst beim Decode-Versuch fehl —
-das ist Sache des Ablieferers.
+Codec-seitig erwartet info-beamer für Videos H.264 oder HEVC. H.264
+läuft auf allen Pi-Generationen mit VideoCore IV / VI (Pi 1 bis Pi 4
+inkl. Zero-/CM-Varianten) hardware-beschleunigt; auf Pi 5 mit
+VideoCore VII fällt H.264 in Software (höhere CPU-Last). HEVC ist
+ab Pi 4+ hardware-beschleunigt. Abweichende Codecs in den
+zugelassenen Containern (z. B. HEVC-MP4 auf Pi 3) schlagen erst beim
+Decode-Versuch fehl — das ist Sache des Ablieferers.
 
 ## Caching-Verhalten
 
