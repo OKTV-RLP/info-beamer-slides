@@ -4,17 +4,15 @@
 # Infotext Player - Service-Sidecar
 #
 # info-beamer-Lua-Knoten koennen kein HTTP. Dieser Sidecar laeuft als
-# Python-Prozess parallel zum Knoten, pollt regelmaessig die M3U8-
-# Playlist + Folien-Bilder vom Infotext-Server und schreibt die
-# heruntergeladenen Folien direkt in das Knoten-Verzeichnis. Eine
-# manifest.json mit der aktuellen Folienliste wird via util.json_watch
+# Python-Prozess parallel zum Knoten, pollt regelmaessig die
+# Playlist + die darin verlinkten Folien-Assets vom Server und schreibt die
+# heruntergeladenen Dateien direkt in das Knoten-Verzeichnis. Eine
+# manifest.json mit der aktuellen Playliste wird via util.json_watch
 # vom node.lua beobachtet.
 #
-# Folien-Files erhalten den Praefix SLIDE_PREFIX, damit sie sich klar
+# Heruntergeladene Dateien erhalten den Praefix SLIDE_PREFIX, damit sie sich klar
 # von den Knoten-eigenen Dateien (node.lua, node.json, empty.png, ...)
-# unterscheiden lassen. Ein Cache-Unterverzeichnis vermeiden wir, weil
-# info-beamer Folien aus zur Laufzeit befuellten Subdirs nicht
-# zuverlaessig findet (Subdir = Child-Node).
+# unterscheiden lassen.
 #
 # Konfiguration kommt aus config.json (gleicher Pfad wie fuer Lua).
 # Der Service liest sie in jeder Schleifen-Iteration neu, damit
