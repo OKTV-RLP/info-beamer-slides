@@ -156,12 +156,15 @@ local last_cur       = nil    -- zuletzt gerenderte Folie (Slide-Wechsel-Hook)
 -- Watchdog gegen Dauer-Fail aller Folien einer Playlist: Render setzt
 -- slide_drew=true, sobald die aktuelle Folie tatsaechlich gezeichnet
 -- wurde (Image-Decode fertig + non-failed bzw. FG-Video placeable).
--- Beim Advance wird ausgewertet: war kein einziger Frame zeichenbar,
--- inkrementiert consecutive_failed_slides. Erreicht der Counter #slides
--- (kompletter Cycle ohne Erfolg), wechselt der Player nach IDLE und
--- zeigt das Backup. Reset bei jedem erfolgreichen Frame, beim IDLE->
--- PLAYING-Uebergang und nach jedem Manifest-Update (s. swap_slides-
--- Aufrufer bzw. IDLE-Branch).
+-- Beim Slide-Advance wird ausgewertet: war ueber die gesamte Lebenszeit
+-- der Folie kein einziger Frame zeichenbar (slide_drew bleibt false),
+-- inkrementiert consecutive_failed_slides; andernfalls Reset auf 0.
+-- slide_drew wird im selben Schritt zurueckgesetzt, sodass die
+-- naechste Folie wieder bei false startet. Erreicht der Counter
+-- #slides (kompletter Cycle ohne sichtbaren Frame), wechselt der
+-- Player nach IDLE und zeigt das Backup. Zusaetzliche Resets beim
+-- IDLE->PLAYING-Uebergang und nach jedem Manifest-Update am Cycle-
+-- Ende (s. swap_slides-Aufrufer im Advance-Pfad bzw. IDLE-Branch).
 local slide_drew                = false
 local consecutive_failed_slides = 0
 
@@ -1836,7 +1839,16 @@ function node.render()
             if first.kind == "video" then
                 ready = true
             else
-                ready = first.failed or image_drawable(first)
+                -- Reihenfolge wichtig: image_drawable() ZUERST aufrufen,
+                -- damit image_ready() einen evtl. neu erkannten Decode-
+                -- Fehler in first.failed materialisieren kann (Seiten-
+                -- effekt: setzt failed=true, disposed res). Erst danach
+                -- first.failed lesen — sonst wuerde 'first.failed or
+                -- image_drawable(first)' den Failed-State des aktuellen
+                -- Frames verschlucken (or evaluiert links-zuerst, links
+                -- ist im ersten Frame noch false), und der IDLE->
+                -- PLAYING-Uebergang verzoegerte sich um einen Frame.
+                ready = image_drawable(first) or first.failed
             end
             if ready then
                 swap_slides(pending_slides)
