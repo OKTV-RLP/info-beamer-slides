@@ -153,6 +153,21 @@ local slide_started  = 0
 local pending_slides = nil    -- nächste Liste, swap am Zyklus-Ende
 local last_cur       = nil    -- zuletzt gerenderte Folie (Slide-Wechsel-Hook)
 
+-- Watchdog gegen Dauer-Fail aller Folien einer Playlist: Render setzt
+-- slide_drew=true, sobald die aktuelle Folie tatsaechlich gezeichnet
+-- wurde (Image-Decode fertig + non-failed bzw. FG-Video placeable).
+-- Beim Slide-Advance wird ausgewertet: war ueber die gesamte Lebenszeit
+-- der Folie kein einziger Frame zeichenbar (slide_drew bleibt false),
+-- inkrementiert consecutive_failed_slides; andernfalls Reset auf 0.
+-- slide_drew wird im selben Schritt zurueckgesetzt, sodass die
+-- naechste Folie wieder bei false startet. Erreicht der Counter
+-- #slides (kompletter Cycle ohne sichtbaren Frame), wechselt der
+-- Player nach IDLE und zeigt das Backup. Zusaetzliche Resets beim
+-- IDLE->PLAYING-Uebergang und nach jedem Manifest-Update am Cycle-
+-- Ende (s. swap_slides-Aufrufer im Advance-Pfad bzw. IDLE-Branch).
+local slide_drew                = false
+local consecutive_failed_slides = 0
+
 -- Zyklus-Crossfade (letzte Folie alt → erste Folie neu).
 local outgoing         = nil   -- nil oder {res, dispose_after}
 local cycle_fade_start = 0
@@ -583,10 +598,36 @@ local function reconcile_window_invalidate()
     last_window_start, last_window_n, last_window_id = nil, nil, nil
 end
 
+-- Pendant zum normalen Window-Reconcile fuer den IDLE-State: laedt
+-- ausschliesslich pending_slides[1], damit der IDLE->PLAYING-
+-- Uebergang ohne sichtbare Decode-Pause erfolgen kann. Bewusst KEINE
+-- Phase-1-Preloads fuer das alte slides-Window — slides wird in IDLE
+-- ohnehin nicht gerendert; ein Phase-1-Decode wuerde via globalem
+-- In-Flight-Gate den pending[1]-Decode aufschieben (auf Pi 3B
+-- mehrere Frames pro Slot) und damit den Uebergang verzoegern.
+-- Auch keine Unload-Phase: bestehendes slides-Window bleibt geladen,
+-- damit ein spaeteres Re-PLAYING ueber swap_slides via File-Keyed-
+-- Cache effizient bleibt.
+--
+-- any_image_in_flight deckt sowohl bereits-laufende slides- als auch
+-- pending-Decodes ab — damit bleibt die Sequentialitaets-Garantie
+-- (kein paralleler Decode auf Pi 3B) auch dann erhalten, wenn slides
+-- aus einer vorigen PLAYING-Phase noch einen Decode in Flight hat.
+local function preload_pending_first()
+    if not pending_slides or not pending_slides[1] then return end
+    local p = pending_slides[1]
+    if p.kind ~= "image"           then return end
+    if p.res or p.failed           then return end
+    if any_image_in_flight(1)      then return end
+    preload_slot(p)
+end
+
 local function reconcile_window(start_idx)
     local n = #slides
     if n == 0 then
         reconcile_window_invalidate()
+        -- Keine slides → ausschliesslich pending_slides[1] preloaden.
+        preload_pending_first()
         return
     end
     local start = math.max(1, start_idx or 1)
@@ -1228,11 +1269,43 @@ end
 -- Liste frei — mit Ausnahme der ggf. von outgoing referenzierten, für
 -- die wir die Disposal-Verantwortung übernehmen, damit der Zyklus-
 -- Crossfade die Textur noch zu Ende rendern kann.
+--
+-- File-Keyed-Cache: vor der Disposal-Phase laufen wir ueber die neue
+-- Liste und uebernehmen fuer Image-Slides bereits geladene Resourcen
+-- aus der alten Liste, sofern (file, kind) uebereinstimmen. Vermeidet
+-- erzwungenen Re-Decode bei Manifest-Updates mit grosser Schnittmenge
+-- (haeufige Faelle: Sidecar-Restart liefert byte-identisches Manifest;
+-- nur einzelne Folien werden hinzugefuegt/entfernt). Doppelvorkommen
+-- desselben Filenames werden eintrags-basiert gematcht — ein einmal
+-- uebernommener alter Slot ist fuer weitere Matches gesperrt
+-- (consumed[i]); doppelte Resourcen entstehen so nicht.
+--
+-- Video-Slides haben slot.res == nil (FG-Video lebt eigenstaendig in
+-- fg_video.res, der Slide-Wechsel-Hook entscheidet ueber Reload bzw.
+-- Preserve). Hier werden sie deshalb uebersprungen.
 local function swap_slides(new_list)
     local old = slides
+
+    local consumed = {}
+    for _, ns in ipairs(new_list) do
+        if ns.kind == "image" and not ns.res and not ns.failed then
+            for i, oldslide in ipairs(old) do
+                if not consumed[i]
+                   and oldslide.kind == "image"
+                   and oldslide.file == ns.file
+                   and (oldslide.res or oldslide.failed) then
+                    ns.res    = oldslide.res
+                    ns.failed = oldslide.failed
+                    consumed[i] = true
+                    break
+                end
+            end
+        end
+    end
+
     slides = new_list
-    for _, s in ipairs(old) do
-        if s.res then
+    for i, s in ipairs(old) do
+        if s.res and not consumed[i] then
             if outgoing and outgoing.res == s.res then
                 outgoing.dispose_after = true
             else
@@ -1627,29 +1700,14 @@ util.json_watch("manifest.json", function(m)
     dispose_list(pending_slides)
     pending_slides = loaded
 
-    -- Kein eager Preload — reconcile_window triggert pending[1]
-    -- erst, wenn das aktuelle Window settled ist (kein In-Flight
-    -- Decode). Damit bleibt die Sequentialitaets-Garantie auch ueber
-    -- Manifest-Updates hinweg erhalten.
-
-    if state == STATE_IDLE then
-        -- Sofort einsetzen — kein laufender Zyklus, von dem wir
-        -- ausfaden müssten. Renderer faellt waehrend des Decodes von
-        -- Slot 1 kurzzeitig auf BG+Overlay zurueck (draw_fit ignoriert
-        -- nil-Resources), das ist visuell sauberer als ein Sync-Wait.
-        local old = slides
-        slides = pending_slides
-        pending_slides = nil
-        dispose_list(old)
-        current_idx   = 1
-        slide_started = now()
-        state = STATE_PLAYING
-        reconcile_window(current_idx)
-    end
-    -- Sonst: bleibt als pending; Renderer swappt am Zyklus-Ende mit
-    -- Crossfade. pending[1] wird durch das End-of-Frame-
-    -- reconcile_window vorgeladen (sequentialisiert mit dem aktuellen
-    -- slides-Window).
+    -- Kein eager Preload und kein direkter IDLE->PLAYING-Wechsel mehr —
+    -- reconcile_window triggert pending[1] in beiden States (IDLE und
+    -- PLAYING) ueber den n==0-Pfad bzw. die Phase-2-Preload. Der IDLE-
+    -- Render-Pfad faehrt erst dann auf PLAYING um, wenn pending[1]
+    -- draw-ready ist (Image: image_drawable; Video: sofort, weil
+    -- fg_video_load erst im Slide-Wechsel-Hook nach dem Uebergang
+    -- triggert). Im PLAYING-State swappt der Renderer am Zyklus-Ende
+    -- mit Crossfade.
 end)
 
 ------------------------------------------------------------
@@ -1779,6 +1837,54 @@ function node.render()
     gl.clear(0, 0, 0, 0)
 
     if state == STATE_IDLE then
+        -- IDLE->PLAYING-Uebergang: schaltet auf PLAYING um, sobald
+        -- pending_slides[1] draw-ready ist. Der Aufruf steht VOR der
+        -- Backup-Zeichnung, damit im Wechsel-Frame bereits der PLAYING-
+        -- Pfad rendert (kein zusaetzlicher Backup-Frame). Image-Slides
+        -- gelten als ready, sobald image_drawable true liefert (oder
+        -- der Slot ohnehin failed ist — der Watchdog faengt das spaeter
+        -- wieder ab); Video-Slides sofort, weil fg_video_load erst im
+        -- Slide-Wechsel-Hook nach dem Uebergang triggert.
+        if pending_slides and pending_slides[1] then
+            local first = pending_slides[1]
+            local ready
+            if first.kind == "video" then
+                ready = true
+            else
+                -- Reihenfolge wichtig: image_drawable() ZUERST aufrufen,
+                -- damit image_ready() einen evtl. neu erkannten Decode-
+                -- Fehler in first.failed materialisieren kann (Seiten-
+                -- effekt: setzt failed=true, disposed res). Erst danach
+                -- first.failed lesen — sonst wuerde 'first.failed or
+                -- image_drawable(first)' den Failed-State des aktuellen
+                -- Frames verschlucken (or evaluiert links-zuerst, links
+                -- ist im ersten Frame noch false), und der IDLE->
+                -- PLAYING-Uebergang verzoegerte sich um einen Frame.
+                ready = image_drawable(first) or first.failed
+            end
+            if ready then
+                swap_slides(pending_slides)
+                pending_slides            = nil
+                current_idx               = 1
+                -- Zeitbasis innerhalb des Render-Ticks konsistent
+                -- halten: Frame-Zeitstempel t (aus dem Frame-Start)
+                -- verwenden, nicht now() — sonst laege slide_started
+                -- ein paar Mikrosekunden NACH t, und der erste
+                -- elapsed=t-slide_started im PLAYING-Pfad waere
+                -- minimal negativ (kann Fade-/Advance-Logik
+                -- inkonsistent stossen).
+                slide_started             = t
+                slide_drew                = false
+                consecutive_failed_slides = 0
+                state                     = STATE_PLAYING
+                -- KEIN early return: weiter mit dem PLAYING-Branch im
+                -- selben Frame, damit der erste Render-Tick der neuen
+                -- Playlist nicht erst auf den Folge-Frame wartet.
+            end
+        end
+    end
+
+    if state == STATE_IDLE then
         -- Defensiv: falls IDLE betreten wurde, ohne dass die ueblichen
         -- State-Transition-Pfade FG-Cleanup gelaufen sind. Greift auch
         -- bei haengendem bg_yielded_state (z. B. nach fehlgeschlagenem
@@ -1807,6 +1913,14 @@ function node.render()
         -- Cornerlogo IMMER ganz oben (auch im Backup-Zustand).
         draw_corner_logo()
         last_cur = nil
+        -- pending_slides[1] direkt preloaden, damit der naechste
+        -- IDLE->PLAYING-Uebergang ohne Decode-Wartezeit erfolgen kann.
+        -- Bewusst NICHT reconcile_window: in IDLE wird slides nicht
+        -- gerendert, ein Phase-1-Preload des alten Windows waere
+        -- verschwendete Decode-Zeit und wuerde via In-Flight-Gate den
+        -- pending[1]-Decode hinauszoegern (siehe preload_pending_first
+        -- fuer Details).
+        preload_pending_first()
         return
     end
 
@@ -1950,12 +2064,43 @@ function node.render()
     -- Flackern, in dem die naechste Folie kurz allein sichtbar ist,
     -- bevor das Cycle-Crossfade im Folgeframe startet.
     if should_advance then
+        -- Watchdog Dauer-Fail: konnte die ablaufende Folie ueberhaupt
+        -- gezeichnet werden? slide_drew wird im Render-Pfad bei
+        -- erfolgreichem Image-/Video-Frame gesetzt. Ein kompletter
+        -- Cycle (#slides Advances) ohne ein einziges sichtbares Frame
+        -- → Backup-Modus (state=IDLE). Greift bei systematischen
+        -- Lade-Fehlern, z. B. wenn der Sidecar Folien-Files schon
+        -- geloescht hat, bevor sie gerendert werden konnten, oder
+        -- alle Slots als slot.failed markiert sind.
+        if slide_drew then
+            consecutive_failed_slides = 0
+        else
+            consecutive_failed_slides = consecutive_failed_slides + 1
+        end
+        slide_drew = false
+
+        if #slides > 0 and consecutive_failed_slides >= #slides then
+            print(string.format(
+                "Watchdog: %d Folien ohne sichtbaren Frame — Backup wird angezeigt.",
+                consecutive_failed_slides
+            ))
+            leave_video_slide_if_active()
+            end_cycle_fade()
+            last_cur                  = nil
+            pending_image_hold_res    = nil
+            bg_resume_gate            = nil
+            consecutive_failed_slides = 0
+            state                     = STATE_IDLE
+            return
+        end
+
         if current_idx >= #slides then
             -- Zyklus-Ende: outgoing erfassen, ggf. pending einsetzen.
             set_outgoing(cur)
             if pending_slides then
                 swap_slides(pending_slides)
-                pending_slides = nil
+                pending_slides            = nil
+                consecutive_failed_slides = 0
             end
             current_idx = 1
             -- Single-Slot-Loops (#slides == 1): beim Wrap zeigt
@@ -2017,32 +2162,55 @@ function node.render()
     -- der Frame haette weder FG-Video noch Hintergrund.
     if cur ~= last_cur then
         if cur.kind == "video" then
-            -- Image->Video: alte Image-Folie fuer 1 Frame nach dem
-            -- Wechsel halten, sodass BG-Video (Compositor-Lag) und
-            -- Image (GL-Surface) gleichzeitig vom Schirm verschwinden.
-            -- Nur bei Video-BG: Image-BG hat keinen Compositor-Lag
-            -- (verschwindet synchron mit der GL-Surface via clear), das
-            -- Hold waere dort unnoetig und koennte ein bereits
-            -- placeable FG-Video 1 Frame verdecken. Pruefung muss VOR
-            -- background_yield() laufen, weil yield() background_slot
-            -- auf nil setzt. Resource lebt bis zum Render weiter — bei
-            -- Cycle-Wrap sorgt set_outgoing/swap_slides dafuer, dass
-            -- die letzte Folie nicht direkt disposed wird.
-            if last_cur and last_cur.kind == "image" and last_cur.res
-               and background_slot.kind == "video" and background_slot.res then
-                pending_image_hold_res = last_cur.res
+            -- File-Keyed Video-Preserve: dasselbe File laeuft bereits
+            -- als FG-Video und liefert noch Frames ("playing"). Tritt
+            -- nach swap_slides bei identischer Single-Video-Playlist
+            -- auf (haeufiger Fall: Sidecar-Restart liefert byte-
+            -- identisches Manifest; #slides==1 mit looped=true). Ohne
+            -- diese Pruefung wuerde der Decoder unnoetig disposed,
+            -- BG-Video re-yielded und der Loop neu angeworfen — mit
+            -- sichtbarem Reload-Glitch. State-Whitelist gegen "loaded"/
+            -- "paused"/"finished"/"error" gewollt: nur waehrend echtem
+            -- Frame-Strom darf der Decoder uebernommen werden (bei
+            -- "finished" muesste reloaded werden, weil der Decoder
+            -- sich bei looped=false nach Ende nicht wieder anstossen
+            -- laesst).
+            local can_preserve = false
+            if fg_video.res and fg_video.file == cur.file then
+                local ok, st = pcall(function() return fg_video.res:state() end)
+                if ok and st == "playing" then
+                    can_preserve = true
+                end
             end
-            background_yield()
-            -- Single-Video-Playlist (#slides == 1, Slot ist Video):
-            -- decoder-internes Looping aktivieren. fg_video.res bleibt
-            -- damit dauerhaft auf der "playing"-Resource liegen,
-            -- state() liefert nie "finished", und der Advance-Pfad
-            -- darunter wird einmalig durch pending_slides gebrochen
-            -- (s. should_advance fuer Video).
-            local single_video_loop =
-                #slides == 1 and slides[1].kind == "video"
-            if not fg_video_load(cur, single_video_loop) then
-                background_resume()
+
+            if not can_preserve then
+                -- Image->Video: alte Image-Folie fuer 1 Frame nach dem
+                -- Wechsel halten, sodass BG-Video (Compositor-Lag) und
+                -- Image (GL-Surface) gleichzeitig vom Schirm verschwinden.
+                -- Nur bei Video-BG: Image-BG hat keinen Compositor-Lag
+                -- (verschwindet synchron mit der GL-Surface via clear), das
+                -- Hold waere dort unnoetig und koennte ein bereits
+                -- placeable FG-Video 1 Frame verdecken. Pruefung muss VOR
+                -- background_yield() laufen, weil yield() background_slot
+                -- auf nil setzt. Resource lebt bis zum Render weiter — bei
+                -- Cycle-Wrap sorgt set_outgoing/swap_slides dafuer, dass
+                -- die letzte Folie nicht direkt disposed wird.
+                if last_cur and last_cur.kind == "image" and last_cur.res
+                   and background_slot.kind == "video" and background_slot.res then
+                    pending_image_hold_res = last_cur.res
+                end
+                background_yield()
+                -- Single-Video-Playlist (#slides == 1, Slot ist Video):
+                -- decoder-internes Looping aktivieren. fg_video.res bleibt
+                -- damit dauerhaft auf der "playing"-Resource liegen,
+                -- state() liefert nie "finished", und der Advance-Pfad
+                -- darunter wird einmalig durch pending_slides gebrochen
+                -- (s. should_advance fuer Video).
+                local single_video_loop =
+                    #slides == 1 and slides[1].kind == "video"
+                if not fg_video_load(cur, single_video_loop) then
+                    background_resume()
+                end
             end
         elseif fg_video.res or bg_yielded_state then
             -- Cleanup auf den tatsaechlichen Decoder-Zustand stuetzen,
@@ -2096,6 +2264,7 @@ function node.render()
         end_cycle_fade()
         if video_placeable(fg_video.res) then
             pcall(function() fg_video.res:place(0, 0, WIDTH, HEIGHT) end)
+            slide_drew = true
         end
     else
         -- Gate aufloesen, sobald BG-Video placeable ist (oder Timeout).
@@ -2151,6 +2320,7 @@ function node.render()
                     local progress = cycle_elapsed / fade_dur
                     draw_crossfade(outgoing.res, cur.res, progress)
                     slide_drawn = true
+                    slide_drew  = true
                 else
                     end_cycle_fade()
                 end
@@ -2173,8 +2343,12 @@ function node.render()
                    and current_idx < #slides then
                     local progress = math.min(1, (elapsed - fade_at) / fade_dur)
                     draw_crossfade(cur.res, nxt.res, progress)
+                    slide_drew = true
                 else
                     draw_fit(cur.res, 1)
+                    if image_drawable(cur) then
+                        slide_drew = true
+                    end
                 end
             end
         end

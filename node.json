@@ -13,14 +13,14 @@
             "name": "playlist_url",
             "type": "string",
             "default": "https://example.com/slides/playlist.m3u8",
-            "hint": "URL der M3U8-Playlist. http:// und https:// werden unterstützt."
+            "hint": "URL der M3U(8)-Playlist. http:// und https:// werden unterstützt."
         },
         {
             "title": "Basis-URL",
             "name": "base_url",
             "type": "string",
             "default": "",
-            "hint": "Wurzel für relative Playlist-Einträge. Leer: Verzeichnis der Playlist-URL. Relativ (videos/): gegen Playlist-Verzeichnis aufgelöst. Vollständige URL (https://…): ersetzt Playlist-Verzeichnis. Vollständige URLs in Einträgen ignorieren diesen Wert."
+            "hint": "Wurzel für relative Playlist-Einträge. Leer: Verzeichnis der Playlist-URL. Relativ (videos/): gegen Playlist-Verzeichnis aufgelöst. URL (https://…): ersetzt Playlist-Verzeichnis. Vollständige URLs in Einträgen ignorieren diesen Wert."
         },
         {
             "title": "Self-signed-HTTPS akzeptieren",
@@ -52,7 +52,7 @@
             "name": "fade_duration",
             "type": "integer",
             "default": 500,
-            "hint": "Crossfade-Dauer in Millisekunden zwischen zwei Folien (intra- und inter-Zyklus). 0 = Harter Schnitt."
+            "hint": "Crossfade-Dauer in Millisekunden zwischen zwei Folien. 0 = Harter Schnitt."
         },
         {
             "title": "Standard-Anzeigedauer (Sekunden)",
@@ -74,7 +74,7 @@
                 "video"
             ],
             "default": "empty.png",
-            "hint": "Wird angezeigt, wenn die Playlist nicht geladen werden kann oder leer ist. Bilder funktionieren auf jedem Pi; Video-Loops setzen Pi 4+ voraus."
+            "hint": "Wird bei leerer Playlist ersatzweise angezeigt. Bild oder Video-Loop."
         },
         {
             "title": "Hintergrund-Inhalt (Bild oder Video, optional)",
@@ -85,7 +85,7 @@
                 "video"
             ],
             "default": "empty.png",
-            "hint": "Bild oder MP4-Loop hinter den Folien. Bilder funktionieren auf jedem Pi; Video-Loops setzen Pi 4+ voraus. Transparente PNG-Folien lassen den Hintergrund durchscheinen."
+            "hint": "Bild oder Video-Loop hinter den Folien. Transparente Folien-Pixel lassen den Hintergrund durchscheinen."
         },
         {
             "title": "Zeit-Overlay",

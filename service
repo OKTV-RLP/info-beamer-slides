@@ -4,17 +4,15 @@
 # Infotext Player - Service-Sidecar
 #
 # info-beamer-Lua-Knoten koennen kein HTTP. Dieser Sidecar laeuft als
-# Python-Prozess parallel zum Knoten, pollt regelmaessig die M3U8-
-# Playlist + Folien-Bilder vom Infotext-Server und schreibt die
-# heruntergeladenen Folien direkt in das Knoten-Verzeichnis. Eine
-# manifest.json mit der aktuellen Folienliste wird via util.json_watch
+# Python-Prozess parallel zum Knoten, pollt regelmaessig die
+# Playlist + die darin verlinkten Folien-Assets vom Server und schreibt die
+# heruntergeladenen Dateien direkt in das Knoten-Verzeichnis. Eine
+# manifest.json mit der aktuellen Playliste wird via util.json_watch
 # vom node.lua beobachtet.
 #
-# Folien-Files erhalten den Praefix SLIDE_PREFIX, damit sie sich klar
+# Heruntergeladene Dateien erhalten den Praefix SLIDE_PREFIX, damit sie sich klar
 # von den Knoten-eigenen Dateien (node.lua, node.json, empty.png, ...)
-# unterscheiden lassen. Ein Cache-Unterverzeichnis vermeiden wir, weil
-# info-beamer Folien aus zur Laufzeit befuellten Subdirs nicht
-# zuverlaessig findet (Subdir = Child-Node).
+# unterscheiden lassen.
 #
 # Konfiguration kommt aus config.json (gleicher Pfad wie fuer Lua).
 # Der Service liest sie in jeder Schleifen-Iteration neu, damit
@@ -37,9 +35,41 @@ import requests
 import urllib3
 import pytz
 
-SLIDE_PREFIX = "slide_"
+SLIDE_PREFIX = u"slide-"
 MANIFEST     = "manifest.json"
 CONFIG       = "config.json"
+
+# Grace-Period fuer Cache-GC: Files, die nicht mehr in der aktuellen
+# Playlist enthalten sind, werden NICHT sofort geloescht, sondern erst
+# nach Ablauf dieser Frist. Hintergrund: der Lua-Renderer arbeitet mit
+# einem Sliding-Window-Preload (SLIDE_WINDOW = 5 in node.lua) und laedt
+# Folien jenseits des Windows erst bei Bedarf von Disk neu. Falls eine
+# Folie aus dem aktuellen Manifest-Update herausfaellt, sich aber noch
+# in der laufenden, vom Renderer gerade abgespielten Vorgaenger-Liste
+# befindet (weil der Swap erst am Cycle-Ende erfolgt), wuerde ein
+# sofortiges Loeschen sie ihrer Disk-Backing-Datei berauben — Renderer
+# zeigt dann reines BG, bis die naechste vorhandene Folie an der Reihe
+# ist. 1 Stunde deckt selbst sehr lange Cycle-Zeiten (lange Playlist
+# mit langer per-Folie Standdauer) konservativ ab. Pi-Disk ist
+# typischerweise 8-16 GB, zusaetzlich gehaltene Folien fuer eine Stunde
+# sind dort keine kritische Belastung.
+SLIDE_GRACE_SECONDS = 3600
+
+# Schutzliste fuer den Cache-GC. Pro Eintrag:
+#   value = None  → File ist aktuell in der Playlist (unbefristeter Schutz)
+#   value = ts    → File ist aus der Playlist gefallen, Schutz bis ts
+#                   (Grace-Period)
+# Die Loesch-Regel ist damit eine einzige Membership-Pruefung:
+# `fname in _protected` → nicht loeschen. Faellt ein Eintrag nach
+# Grace-Ablauf aus der Liste, ist die Datei automatisch Loesch-
+# Kandidat im selben GC-Lauf — kein expliziter Loesch-Schritt im
+# Grace-Pfad noetig.
+#
+# None auf dem ersten GC-Lauf nach Sidecar-Start: dann gracen wir
+# defensiv alle bereits liegenden Waisen einmalig (Sidecar-Restart
+# darf keine Lua-Live-Folien killen, deren Manifest-Stand vor dem
+# Restart aktiv war).
+_protected = None
 
 # UDP-IPC zu info-beamer auf dem Standard-Port. Wird fuer das Push
 # des Zeit-Texts an den Lua-Knoten verwendet, statt eine Datei auf
@@ -51,6 +81,13 @@ _ipc_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 
 def log(msg):
+    # Robust gegen Unicode-Inhalte: in Py2 hat sys.stderr selten ein
+    # passendes Encoding gesetzt (Pi laeuft typisch unter locale=C/
+    # POSIX), ein direktes write(unicode) wuerde mit UnicodeEncodeError
+    # abbrechen, sobald nicht-ASCII Zeichen im Log-Inhalt auftauchen
+    # (z. B. Umlaute in Filenames, URLs).
+    if isinstance(msg, unicode):
+        msg = msg.encode("utf-8", errors="replace")
     sys.stderr.write("[infotext-service] %s\n" % msg)
     sys.stderr.flush()
 
@@ -163,11 +200,25 @@ def parse_playlist(text, default_dur):
         elif line and not line.startswith("#"):
             name = basename_from_entry(line)
             if name:
-                entries.append({
-                    "name":     name,
-                    "url":      line,
-                    "duration": duration,
-                })
+                # Format-Allowlist: Eintraege mit nicht unterstuetzter
+                # Endung werden verworfen (statt sie ins Manifest zu
+                # uebernehmen und in Lua am resource.load_image/_video
+                # scheitern zu lassen). Log-Hinweis pro Eintrag, damit
+                # Ablieferer eine eindeutige Spur haben.
+                if media_type(name) is None:
+                    # Format-String als Unicode, weil 'line' aus
+                    # r.text Unicode mit Nicht-ASCII (Umlaute in
+                    # Pfad/URL) sein kann — bytes-Format mit unicode-
+                    # Operand promoted zwar in Py2 sauber zu unicode,
+                    # aber u"..."-Format macht die Intention explizit.
+                    log(u"Playlist-Eintrag uebersprungen "
+                        u"(Format nicht unterstuetzt): %s" % line)
+                else:
+                    entries.append({
+                        "name":     name,
+                        "url":      line,
+                        "duration": duration,
+                    })
             duration = default_dur
     return entries
 
@@ -176,30 +227,46 @@ def slide_filename(name):
     return SLIDE_PREFIX + name
 
 
-# Endungen, die als Video-Container interpretiert werden. Bewusst
-# konservativ: info-beamer dokumentiert nur MP4 als unterstuetzten
-# Container fuer resource.load_video; m4v ist derselbe Container mit
-# anderem Suffix; mov teilt das ISO-BMFF-Boxen-Layout und wird vom
-# MMAL-Demuxer in der Praxis akzeptiert. webm/mkv/avi sind in der
-# info-beamer-Doku nirgendwo als unterstuetzt aufgefuehrt — Dateien
-# mit diesen Endungen werden hier daher als "image" durchgereicht und
-# wuerden in node.lua am resource.load_image scheitern (saubere
-# Fehlermeldung statt undefiniertem Verhalten beim Video-Decode).
+# Allowlists fuer unterstuetzte Folien-Formate.
+#
+# IMAGE_EXTENSIONS: Endungen, die info-beamer ueber resource.load_image
+# zuverlaessig dekodiert.
+#
+# VIDEO_EXTENSIONS: Endungen, die als Video-Container interpretiert
+# werden. Bewusst konservativ: info-beamer dokumentiert nur MP4 als
+# unterstuetzten Container fuer resource.load_video; m4v ist derselbe
+# Container mit anderem Suffix; mov teilt das ISO-BMFF-Boxen-Layout
+# und wird vom MMAL-Demuxer in der Praxis akzeptiert.
 # Codec-Erwartung: H.264 fuer alle Pi-Versionen mit Hardware-Decoder;
 # HEVC nur Pi 4+ ab info-beamer hosted v10. Abweichende Codecs in den
 # zugelassenen Containern (z. B. HEVC-MP4 auf Pi 3) schlagen beim
 # Decode-Versuch fehl — das ist Sache des Ablieferers.
-# Identische Liste wie media_type_for in node.lua.
+# Identische Video-Liste wie media_type_for in node.lua.
+#
+# Eintraege in der Playlist mit nicht aufgefuehrten Endungen werden
+# in parse_playlist verworfen (mit Log-Hinweis), bevor sie ins
+# Manifest gelangen. Damit sieht node.lua nur Files mit zugesicherten
+# Formaten.
+IMAGE_EXTENSIONS = ("png", "jpg", "jpeg")
 VIDEO_EXTENSIONS = ("mp4", "m4v", "mov")
 
 
 def media_type(name):
+    """Liefert "image" / "video" / None.
+
+    None signalisiert, dass das Format weder in IMAGE_EXTENSIONS noch
+    in VIDEO_EXTENSIONS gelistet ist und vom info-beamer-Renderer
+    nicht zuverlaessig dekodierbar ist. parse_playlist nutzt das, um
+    den Eintrag zu verwerfen — das Manifest enthaelt damit nur
+    Eintraege mit gueltigem media_type."""
     if "." not in name:
-        return "image"
+        return None
     ext = name.rsplit(".", 1)[-1].lower()
+    if ext in IMAGE_EXTENSIONS:
+        return "image"
     if ext in VIDEO_EXTENSIONS:
         return "video"
-    return "image"
+    return None
 
 
 def write_manifest(entries):
@@ -475,6 +542,127 @@ def sleep_with_time_ticks(total_seconds):
         time.sleep(min(1.0, max(0.1, remaining)))
 
 
+def cache_gc(keep):
+    """Cache-GC mit Grace-Period.
+
+    Loesch-Regel: alle Files mit SLIDE_PREFIX werden geloescht, ausser
+    sie stehen auf der Schutzliste _protected. .tmp-Reste werden immer
+    sofort geloescht (sind nie Teil einer aktiven Playlist).
+
+    Die Schutzliste wird in jedem Aufruf neu zusammengestellt:
+      1. alle Files in 'keep' (= aktuelle Playlist) → value=None
+         (unbefristeter Schutz, solange sie in der Playlist sind)
+      2. alle Files, die im vorigen Lauf geschuetzt waren, aber NICHT
+         mehr in 'keep' enthalten sind:
+            - vorher value=None (waren in der Playlist) → neue Grace
+              startet
+            - vorher value=ts und ts noch in der Zukunft           →
+              Grace-Eintrag wird uebernommen
+            - vorher value=ts und ts erreicht                      →
+              Eintrag entfaellt; Datei ist im selben Lauf Loesch-
+              Kandidat (kein expliziter Loesch-Schritt im Grace-Pfad).
+
+    Erster Lauf nach Sidecar-Start (_protected is None): alle bereits
+    liegenden Waisen bekommen defensiv eine Grace, damit ein Restart
+    waehrend laufender Lua-Wiedergabe nicht die noch benoetigten
+    Folien-Files killt (Sliding-Window haelt nur SLIDE_WINDOW Texturen
+    vor; Folien jenseits davon muessen vom Disk nachgeladen werden
+    koennen)."""
+    global _protected
+
+    now_ts = time.time()
+
+    # Disk scannen — Praefix-Filter schuetzt Knoten-eigene Dateien
+    # (node.lua, node.json, empty.png, ...) vor versehentlicher
+    # Loeschung.
+    #
+    # os.listdir(u".") (Unicode-Argument) liefert in Py2 Unicode-
+    # Filenames; ein Bytes-Argument liefert dagegen Bytes. Wir halten
+    # die GC durchgaengig in Unicode, weil keep ueber slide_filename
+    # (u"slide-" + unicode) ohnehin Unicode liefert. Andernfalls
+    # wuerde 'fname in keep' bei nicht-ASCII Filenames implizit das
+    # Bytes-Element nach ASCII decoden und mit UnicodeDecodeError
+    # abbrechen.
+    seen_files = set()
+    tmp_files  = set()
+    try:
+        for fname in os.listdir(u"."):
+            if not fname.startswith(SLIDE_PREFIX):
+                continue
+            if fname.endswith(u".tmp"):
+                tmp_files.add(fname)
+            else:
+                seen_files.add(fname)
+    except OSError as e:
+        log("Cache-GC: listdir fehlgeschlagen: %s" % e)
+        return
+
+    # Schutzliste neu aufbauen.
+    new_protected = {fname: None for fname in keep}
+
+    if _protected is None:
+        # Erster Lauf seit Sidecar-Start: alle bereits liegenden
+        # Waisen defensiv in Grace ueberfuehren.
+        for fname in seen_files - keep:
+            new_protected[fname] = now_ts + SLIDE_GRACE_SECONDS
+    else:
+        # Eintraege aus dem vorigen Lauf carryen oder ablaufen lassen.
+        # Files, die zwischenzeitlich gar nicht mehr auf Disk liegen
+        # (manuell entfernt, FS-Korruption, ...), werden ebenfalls
+        # gedroppt — sonst wuechse _protected unbegrenzt mit toten
+        # Eintraegen, fuer die es nichts zu schuetzen gibt.
+        for fname, prev_val in _protected.items():
+            if fname in new_protected:
+                continue                              # wieder in Playlist → keep-Schutz
+            if fname not in seen_files:
+                continue                              # File nicht mehr auf Disk → toter Eintrag
+            if prev_val is None:
+                # War in Playlist, ist jetzt rausgefallen → Grace starten.
+                new_protected[fname] = now_ts + SLIDE_GRACE_SECONDS
+            elif now_ts < prev_val:
+                # Grace laeuft noch.
+                new_protected[fname] = prev_val
+            # else: Grace abgelaufen → nicht uebernehmen → faellt aus
+            # der Schutzliste, wird im Loesch-Pass entfernt.
+
+    _protected = new_protected
+
+    # Loesch-Pass.
+    removed = 0
+    for fname in tmp_files:
+        try:
+            os.remove(fname)
+            removed += 1
+        except OSError:
+            pass
+
+    for fname in seen_files:
+        if fname in _protected:
+            continue
+        try:
+            os.remove(fname)
+            removed += 1
+        except OSError as e:
+            # File bleibt liegen; der naechste GC-Lauf retryed sofort,
+            # weil _protected es nicht mehr enthaelt (steht jetzt weder
+            # in keep noch in der vorigen _protected → keine erneute
+            # Grace).
+            #
+            # Format-Args defensiv nach unicode bringen: str(e) gibt
+            # in Py2 bytes mit potenziell Nicht-ASCII Inhalt zurueck
+            # (OSError enthaelt typisch den Filename, der hier
+            # garantiert non-ASCII sein kann). Ein 'u"%s" % e' wuerde
+            # ohne Pre-Decode an der ASCII-Decode-Schranke scheitern,
+            # bevor log() den Text utf-8-encoden kann — Service-Loop
+            # wuerde abbrechen.
+            err_text = str(e).decode("utf-8", errors="replace")
+            log(u"Cache-Loeschung fehlgeschlagen: %s (%s)" %
+                (fname, err_text))
+
+    if removed:
+        log("Cache aufgeraeumt: %d Datei(en) entfernt." % removed)
+
+
 def main():
     last_manifest_hash = None
 
@@ -588,30 +776,11 @@ def main():
                     log("Folie-Download fehlgeschlagen %s (%s): %s" %
                         (entry["name"], download_url, e))
 
-            # Cache aufraeumen: entferne nur Files mit unserem Praefix,
-            # die nicht mehr in der aktuellen Playlist sind, sowie
-            # .tmp-Reste aus abgebrochenen Downloads. Knoten-eigene
-            # Dateien (node.lua, node.json, empty.png, ...) werden durch
-            # die Praefix-Pruefung verschont. Laeuft nur nach
-            # erfolgreichem Playlist-Fetch (HTTP-Fehler springen vorher
-            # per `continue`), daher kein versehentlicher Komplett-Wipe
-            # wegen Netzproblem.
+            # Cache aufraeumen. Laeuft nur nach erfolgreichem Playlist-
+            # Fetch (HTTP-Fehler springen vorher per `continue`), daher
+            # kein versehentlicher Komplett-Wipe wegen Netzproblem.
             keep = set(slide_filename(e["name"]) for e in entries)
-            removed = 0
-            try:
-                for fname in os.listdir("."):
-                    if not fname.startswith(SLIDE_PREFIX):
-                        continue
-                    if fname.endswith(".tmp") or fname not in keep:
-                        try:
-                            os.remove(fname)
-                            removed += 1
-                        except OSError:
-                            pass
-            except OSError as e:
-                log("Cache-GC fehlgeschlagen: %s" % e)
-            if removed:
-                log("Cache aufgeraeumt: %d Datei(en) entfernt." % removed)
+            cache_gc(keep)
 
             available = [
                 e for e in entries
