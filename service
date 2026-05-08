@@ -208,8 +208,13 @@ def parse_playlist(text, default_dur):
                 # scheitern zu lassen). Log-Hinweis pro Eintrag, damit
                 # Ablieferer eine eindeutige Spur haben.
                 if media_type(name) is None:
-                    log("Playlist-Eintrag uebersprungen "
-                        "(Format nicht unterstuetzt): %s" % line)
+                    # Format-String als Unicode, weil 'line' aus
+                    # r.text Unicode mit Nicht-ASCII (Umlaute in
+                    # Pfad/URL) sein kann — bytes-Format mit unicode-
+                    # Operand promoted zwar in Py2 sauber zu unicode,
+                    # aber u"..."-Format macht die Intention explizit.
+                    log(u"Playlist-Eintrag uebersprungen "
+                        u"(Format nicht unterstuetzt): %s" % line)
                 else:
                     entries.append({
                         "name":     name,
@@ -644,7 +649,17 @@ def cache_gc(keep):
             # weil _protected es nicht mehr enthaelt (steht jetzt weder
             # in keep noch in der vorigen _protected → keine erneute
             # Grace).
-            log("Cache-Loeschung fehlgeschlagen: %s (%s)" % (fname, e))
+            #
+            # Format-Args defensiv nach unicode bringen: str(e) gibt
+            # in Py2 bytes mit potenziell Nicht-ASCII Inhalt zurueck
+            # (OSError enthaelt typisch den Filename, der hier
+            # garantiert non-ASCII sein kann). Ein 'u"%s" % e' wuerde
+            # ohne Pre-Decode an der ASCII-Decode-Schranke scheitern,
+            # bevor log() den Text utf-8-encoden kann — Service-Loop
+            # wuerde abbrechen.
+            err_text = str(e).decode("utf-8", errors="replace")
+            log(u"Cache-Loeschung fehlgeschlagen: %s (%s)" %
+                (fname, err_text))
 
     if removed:
         log("Cache aufgeraeumt: %d Datei(en) entfernt." % removed)
