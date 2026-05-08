@@ -598,24 +598,36 @@ local function reconcile_window_invalidate()
     last_window_start, last_window_n, last_window_id = nil, nil, nil
 end
 
+-- Pendant zum normalen Window-Reconcile fuer den IDLE-State: laedt
+-- ausschliesslich pending_slides[1], damit der IDLE->PLAYING-
+-- Uebergang ohne sichtbare Decode-Pause erfolgen kann. Bewusst KEINE
+-- Phase-1-Preloads fuer das alte slides-Window — slides wird in IDLE
+-- ohnehin nicht gerendert; ein Phase-1-Decode wuerde via globalem
+-- In-Flight-Gate den pending[1]-Decode aufschieben (auf Pi 3B
+-- mehrere Frames pro Slot) und damit den Uebergang verzoegern.
+-- Auch keine Unload-Phase: bestehendes slides-Window bleibt geladen,
+-- damit ein spaeteres Re-PLAYING ueber swap_slides via File-Keyed-
+-- Cache effizient bleibt.
+--
+-- any_image_in_flight deckt sowohl bereits-laufende slides- als auch
+-- pending-Decodes ab — damit bleibt die Sequentialitaets-Garantie
+-- (kein paralleler Decode auf Pi 3B) auch dann erhalten, wenn slides
+-- aus einer vorigen PLAYING-Phase noch einen Decode in Flight hat.
+local function preload_pending_first()
+    if not pending_slides or not pending_slides[1] then return end
+    local p = pending_slides[1]
+    if p.kind ~= "image"           then return end
+    if p.res or p.failed           then return end
+    if any_image_in_flight(1)      then return end
+    preload_slot(p)
+end
+
 local function reconcile_window(start_idx)
     local n = #slides
     if n == 0 then
         reconcile_window_invalidate()
-        -- IDLE-Pfad: pending_slides[1] vorladen, damit der spaetere
-        -- IDLE->PLAYING-Uebergang ohne sichtbare Decode-Pause erfolgen
-        -- kann. Backup wird waehrenddessen weiter angezeigt; sobald
-        -- pending[1] draw-ready ist, schaltet der IDLE-Render-Pfad auf
-        -- PLAYING um. any_image_in_flight deckt den n==0-Fall fuer
-        -- pending_slides[1] selbst ab — verhindert doppelten Decode-
-        -- Anstoss.
-        if pending_slides and pending_slides[1] then
-            local p = pending_slides[1]
-            if p.kind == "image" and not p.res and not p.failed
-               and not any_image_in_flight(1) then
-                preload_slot(p)
-            end
-        end
+        -- Keine slides → ausschliesslich pending_slides[1] preloaden.
+        preload_pending_first()
         return
     end
     local start = math.max(1, start_idx or 1)
@@ -1901,12 +1913,14 @@ function node.render()
         -- Cornerlogo IMMER ganz oben (auch im Backup-Zustand).
         draw_corner_logo()
         last_cur = nil
-        -- pending_slides[1] preloaden, damit der naechste IDLE->PLAYING-
-        -- Uebergang ohne Decode-Wartezeit erfolgen kann. Bei n==0 nimmt
-        -- reconcile_window die Pending-Phase, sonst der regulaere
-        -- Window-Pfad (slides ist im IDLE typischerweise leer, kann
-        -- aber nach einem Empty-Manifest noch alte Eintraege halten).
-        reconcile_window(current_idx)
+        -- pending_slides[1] direkt preloaden, damit der naechste
+        -- IDLE->PLAYING-Uebergang ohne Decode-Wartezeit erfolgen kann.
+        -- Bewusst NICHT reconcile_window: in IDLE wird slides nicht
+        -- gerendert, ein Phase-1-Preload des alten Windows waere
+        -- verschwendete Decode-Zeit und wuerde via In-Flight-Gate den
+        -- pending[1]-Decode hinauszoegern (siehe preload_pending_first
+        -- fuer Details).
+        preload_pending_first()
         return
     end
 
