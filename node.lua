@@ -2264,15 +2264,25 @@ function node.render()
                     background_resume()
                 end
             end
-        elseif fg_video.res or bg_yielded_state then
-            -- Cleanup auf den tatsaechlichen Decoder-Zustand stuetzen,
-            -- nicht auf last_cur: der Force-Advance fuer Single-Video-
-            -- Loops (s. should_advance fuer Video) setzt last_cur=nil,
-            -- damit der Hook nach dem Wrap auf demselben Lua-Pointer
-            -- noch einmal feuert. Wenn die neue Playlist mit einem
-            -- Image-Slide startet, wuerde 'last_cur and last_cur.kind
-            -- == "video"' nicht mehr greifen — fg_video bliebe geladen
-            -- (Decoder-Slot belegt, Frame-Strom auf Layer -1 sichtbar).
+        elseif fg_video.res or bg_yielded_state or pending_image_hold then
+            -- Cleanup auf den tatsaechlichen Decoder-/Hold-Zustand
+            -- stuetzen, nicht auf last_cur: der Force-Advance fuer
+            -- Single-Video-Loops (s. should_advance fuer Video) setzt
+            -- last_cur=nil, damit der Hook nach dem Wrap auf demselben
+            -- Lua-Pointer noch einmal feuert. Wenn die neue Playlist
+            -- mit einem Image-Slide startet, wuerde 'last_cur and
+            -- last_cur.kind == "video"' nicht mehr greifen — fg_video
+            -- bliebe geladen (Decoder-Slot belegt, Frame-Strom auf
+            -- Layer -1 sichtbar).
+            --
+            -- pending_image_hold im Guard, damit der Pfad auch dann
+            -- feuert, wenn ein vorausgegangener fg_video_load
+            -- fehlgeschlagen ist: in dem Fall ruft der Video-Branch
+            -- direkt background_resume() auf (setzt bg_yielded_state=
+            -- nil), fg_video.res ist ebenfalls nil — beide Hauptbe-
+            -- dingungen waeren ohne pending_image_hold falsch, und der
+            -- gesetzte Hold wuerde ueber den Slide-Wechsel hinweg
+            -- haengen bleiben (Image-Resource wird festgehalten).
             fg_video_unload()
             background_resume()
             -- Etwaigen Hold aus einem vorherigen Image->Video-Wechsel
