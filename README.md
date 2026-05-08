@@ -114,7 +114,7 @@ node.lua       ← Renderer:
 
 | Option | Default | Beschreibung |
 |---|---|---|
-| Playlist-URL | – | M3U8-Playlist-URL (http:// oder https://) |
+| Playlist-URL | – | M3U- oder M3U8-Playlist-URL (http:// oder https://) |
 | Basis-URL | "" | Wurzel für relative Playlist-Einträge (s. *Playlist-Format*). Leer = Verzeichnis der Playlist-URL |
 | Self-signed-HTTPS akzeptieren | false | TLS-Prüfung deaktivieren |
 | Polling-Intervall | 60 s | Wie oft der Service die Playlist prüft |
@@ -124,8 +124,8 @@ node.lua       ← Renderer:
 
 | Option | Default | Beschreibung |
 |---|---|---|
-| Fade-Dauer | 500 ms | Crossfade-Dauer |
-| Standard-Anzeigedauer | 10 s | Fallback wenn `#EXTINF` fehlt |
+| Fade-Dauer | 500 ms | Crossfade-Dauer in Millisekunden. `0` = harter Schnitt zwischen den Folien |
+| Standard-Anzeigedauer | 10 s | Fallback wenn `#EXTINF` fehlt. `#EXTINF:0` ist ebenfalls gültig (Mindesthaltezeit = Fade-Dauer) |
 
 ### Backup & Hintergrund
 
@@ -217,6 +217,39 @@ Während eine Vordergrund-Video-Folie spielt, wird ein konfiguriertes
 Hintergrund-Video für die Dauer der Folie automatisch freigegeben und
 danach wieder geladen — auf Pi 4/5 ist diese Yield-Strategie konservativ
 aber unschädlich.
+
+## Sliding-Window-Preload
+
+Image-Folien werden **nicht** alle gleichzeitig in den GPU-Speicher
+gezogen. Stattdessen hält der Renderer ein gleitendes Fenster der
+nächsten 5 Folien ab `current_idx` als dekodierte Texturen vor; alle
+anderen Slots bleiben Metadaten-only und werden bei Bedarf nachgeladen.
+
+**Hintergrund:** auf Pi 3B mit 256 MiB CMA belegt jede 1920×1080-RGBA-
+Textur ~8 MB GPU-RAM. Eine lange Playlist komplett vorzuladen sprengt
+das CMA-Budget und triggert in info-beamer den Watchdog-Reboot
+(`Cannot alloc texture: out of memory`). Mit dem 5er-Window bleibt
+der Peak-Footprint bei ~40 MB — passt komfortabel.
+
+**Verhalten:**
+
+- Der Render-Loop reconciled das Fenster am Frame-Ende: Slots, die
+  aus dem Window fallen, werden `dispose`d; der nächste vorzuladende
+  Slot wird angetriggert.
+- Pro Frame wird **nur ein** neuer Image-Decode angestoßen — auf
+  Pi 3B konkurrieren parallele PNG-Decodes um CPU/RAM/GEM-Allokationen
+  und können den ursprünglichen OOM-Kontext wiederbeleben.
+- Das Window ist **zyklisch**: am Playlist-Ende wrappt es zu
+  `slides[1]` zurück, sodass `slides[1]` für den Cycle-Wrap-Crossfade
+  schon warm im GPU liegt.
+- Bei einem Manifest-Update wird zusätzlich `pending_slides[1]` als
+  Crossfade-Target für den nächsten Cycle-Wrap vorgeladen, sobald
+  das aktuelle Window settled ist (kein in-flight Decode).
+
+**Konsequenz für Plattenseite:** Folien-Dateien jenseits des Fensters
+müssen vom Disk neu geladen werden können. Der Sidecar-Cache hält
+sie deshalb auch nach Manifest-Updates noch eine Stunde (siehe
+*Caching-Verhalten*).
 
 ## Single-Video-Playlist
 
