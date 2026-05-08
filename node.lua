@@ -2236,11 +2236,25 @@ function node.render()
         last_cur = cur
     end
 
-    -- show_video=true: FG-Video erfolgreich geladen und sichtbar — BG
-    -- nicht zeichnen (FG deckt den Schirm). show_video=false: Image-
-    -- Slide ODER Video-Slide mit Lade-Fehler — BG als sichtbarer
-    -- Untergrund zeichnen.
-    local show_video = (cur.kind == "video") and fg_video.res ~= nil
+    -- show_video=true: FG-Video erfolgreich geladen UND vom Compositor
+    -- placeable (state ∈ {loaded, paused, playing, finished}) — BG
+    -- nicht zeichnen, FG deckt den Schirm. show_video=false: Image-
+    -- Slide, Video-Slide mit Lade-Fehler ODER Video-Slide noch im
+    -- "loading"-State (Decoder waermt sich auf, Frame-Groesse noch
+    -- unbekannt) — BG als sichtbarer Untergrund zeichnen, sonst
+    -- entstuende ein schwarzer Frame zwischen Slide-Wechsel und
+    -- erstem :place-faehigem Frame des neuen Videos.
+    --
+    -- Bei Image-BG bleibt das Image im "loading"-Fenster sichtbar,
+    -- bis das Video uebernehmen kann. Bei Video-BG (per background_
+    -- yield disposed) ist draw_slot ein No-op — dort traegt der
+    -- pending_image_hold_res-Pfad den 1-Frame-Hold fuer den Image->
+    -- Video-Wechsel; ein laengeres Loading-Fenster bei Video->Video
+    -- mit Video-BG kann weiterhin schwarze Frames produzieren (Pi-3B-
+    -- Decoder-Engpass, hier nicht loesbar).
+    local show_video = (cur.kind == "video")
+                       and fg_video.res ~= nil
+                       and video_placeable(fg_video.res)
     if not show_video then
         draw_slot(background_slot, 1)
     end
