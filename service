@@ -37,7 +37,7 @@ import requests
 import urllib3
 import pytz
 
-SLIDE_PREFIX = "slide-"
+SLIDE_PREFIX = u"slide-"
 MANIFEST     = "manifest.json"
 CONFIG       = "config.json"
 
@@ -83,6 +83,13 @@ _ipc_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 
 def log(msg):
+    # Robust gegen Unicode-Inhalte: in Py2 hat sys.stderr selten ein
+    # passendes Encoding gesetzt (Pi laeuft typisch unter locale=C/
+    # POSIX), ein direktes write(unicode) wuerde mit UnicodeEncodeError
+    # abbrechen, sobald nicht-ASCII Zeichen im Log-Inhalt auftauchen
+    # (z. B. Umlaute in Filenames, URLs).
+    if isinstance(msg, unicode):
+        msg = msg.encode("utf-8", errors="replace")
     sys.stderr.write("[infotext-service] %s\n" % msg)
     sys.stderr.flush()
 
@@ -565,13 +572,21 @@ def cache_gc(keep):
     # Disk scannen — Praefix-Filter schuetzt Knoten-eigene Dateien
     # (node.lua, node.json, empty.png, ...) vor versehentlicher
     # Loeschung.
+    #
+    # os.listdir(u".") (Unicode-Argument) liefert in Py2 Unicode-
+    # Filenames; ein Bytes-Argument liefert dagegen Bytes. Wir halten
+    # die GC durchgaengig in Unicode, weil keep ueber slide_filename
+    # (u"slide-" + unicode) ohnehin Unicode liefert. Andernfalls
+    # wuerde 'fname in keep' bei nicht-ASCII Filenames implizit das
+    # Bytes-Element nach ASCII decoden und mit UnicodeDecodeError
+    # abbrechen.
     seen_files = set()
     tmp_files  = set()
     try:
-        for fname in os.listdir("."):
+        for fname in os.listdir(u"."):
             if not fname.startswith(SLIDE_PREFIX):
                 continue
-            if fname.endswith(".tmp"):
+            if fname.endswith(u".tmp"):
                 tmp_files.add(fname)
             else:
                 seen_files.add(fname)
