@@ -1,7 +1,9 @@
 # Infotext Player für info-beamer hosted
 
-Spielt Folien (`playlist.m3u8` + PNG-Folien mit optionalem Alphakanal)
-auf einem info-beamer-hosted-Pi ab. Mit Crossfade, Backup-/
+Spielt Folien (`playlist.m3u8` mit Bild- und/oder Video-Folien) auf
+einem info-beamer-hosted-Pi ab. Unterstützte Formate: **PNG/JPEG** für
+Bilder, **MP4/M4V/MOV** für Videos (H.264, je nach Pi auch HEVC); andere
+Endungen werden vom Sidecar verworfen. Mit Crossfade, Backup-/
 Hintergrund-Layer (Bild oder Video), Live-Uhr-Overlay, Cornerlogo und
 optionalem HTTP/Icecast-Audio-Stream als Hintergrundton.
 
@@ -21,8 +23,9 @@ service        ← Python-Sidecar:
                      und pusht ok/fail via UDP-IPC
                        │
                        ▼
-                 manifest.json + slide_*.png (Folien-Dateien
-                 mit Prefix im Knoten-Wurzelverzeichnis)
+                 manifest.json + slide-* (Folien-Dateien
+                 mit Prefix im Knoten-Wurzelverzeichnis,
+                 Bilder oder Videos je nach Playlist)
                  +  UDP localhost:4444 → "root/time:<text>"
                                        → "root/audio_probe:<ok|fail>:<url>"
                        │
@@ -40,7 +43,13 @@ node.lua       ← Renderer:
   ändert.
 - Der Renderer wendet ein neues Manifest am **Ende des aktuellen
   Zyklus** an, mit Crossfade von der letzten Folie der alten Liste
-  zur ersten Folie der neuen.
+  zur ersten Folie der neuen. Folien, die in der neuen Liste
+  weiterhin enthalten sind, behalten ihre dekodierte GPU-Textur —
+  kein Re-Decode-Storm bei Updates mit großer Schnittmenge.
+- Beim ersten Manifest nach Knoten-Start (oder nach leerem Manifest)
+  bleibt das Backup so lange sichtbar, bis die erste Folie tatsächlich
+  draw-ready ist — kein BG-only-Frame als Lücke zwischen Backup und
+  erster Folie.
 - Cache-Identität ist der Basename des Playlist-Eintrags (gleicher
   Basename ⇒ gleicher Inhalt, vom Server zugesichert); der Cache prüft
   daher nur auf Existenz, kein Hash-Vergleich, keine Re-Downloads.
@@ -58,7 +67,10 @@ node.lua       ← Renderer:
   Zyklus-Grenze hinweg, mit Fragment-Shader für mathematisch korrekte
   Alpha-Komposition.
 - Backup-Inhalt (Bild oder Video-Loop), wenn die Playlist nicht ladbar
-  oder leer ist.
+  oder leer ist. Greift auch, wenn ein Watchdog feststellt, dass
+  über einen kompletten Cycle kein einziger Slide gezeichnet werden
+  konnte (z. B. weil alle Folien-Dateien beschädigt oder verschwunden
+  sind).
 - Optionaler Hintergrund-Inhalt (Bild oder Video-Loop), durch den die
   transparenten Folien durchscheinen.
 - Konfigurierbares Zeit-Overlay (Schrift, Größe, Farbe, Position,
@@ -183,8 +195,8 @@ die TLS-Zertifikatskette gegen die System-CA validiert.
 
 ## Backup- und Hintergrund-Inhalt
 
-Beide Slots akzeptieren entweder ein Bild (PNG/JPG) oder ein Video-Loop
-(MP4/WebM/MOV/MKV). Der Player erkennt den Typ automatisch über die
+Beide Slots akzeptieren entweder ein Bild (PNG/JPEG) oder ein Video-Loop
+(MP4/M4V/MOV). Der Player erkennt den Typ automatisch über die
 Asset-Metadaten von info-beamer hosted bzw. die Datei­endung und lädt
 entsprechend `resource.load_image` oder `resource.load_video`.
 
@@ -193,9 +205,18 @@ Bildschirm gestreckt — bei abweichendem Seitenverhältnis verzerrt es,
 also in nativer Display-Auflösung (z. B. 1920×1080) liefern.
 
 **Video-Loop:** wird mit `raw = true` in die GL-Pipeline geladen, damit
-es sich mit anderen Layern mischen lässt. Das setzt **Raspberry Pi 4
-oder neuer** voraus. Auf Pi 3 schlägt der Load fehl, der Player loggt
-eine Warnung und arbeitet ohne den betroffenen Slot weiter.
+es sich mit anderen Layern mischen lässt. Codec-Unterstützung pro Pi:
+
+- Pi 3 / 3B / 3B+ / Zero 2 W / Pi 4 / CM4: H.264 hardware-beschleunigt
+- Pi 4+ zusätzlich HEVC hardware-beschleunigt (info-beamer hosted v10+)
+- Pi 5: H.264 in Software (kein HW-Decoder mehr in der VPU); funktioniert,
+  kostet aber spürbar mehr CPU. HEVC bleibt HW.
+
+Pi 3 / 3B / Zero 2 W haben nur **einen** H.264-Hardware-Decoder-Slot.
+Während eine Vordergrund-Video-Folie spielt, wird ein konfiguriertes
+Hintergrund-Video für die Dauer der Folie automatisch freigegeben und
+danach wieder geladen — auf Pi 4/5 ist diese Yield-Strategie konservativ
+aber unschädlich.
 
 ## Single-Video-Playlist
 
@@ -412,7 +433,10 @@ Sekunde):
 - Erreichbarkeit des Quell-Servers per HTTP/HTTPS vom Pi aus.
 - Folien-Filenames müssen content-addressed sein (gleicher Name ⇒
   gleicher Inhalt).
-- Für Video-Loops: Raspberry Pi 4 oder neuer.
+- Folien in einem unterstützten Format: PNG/JPEG für Bilder, MP4/M4V/MOV
+  für Videos (siehe *Folien-Format-Allowlist*).
+- Für H.264-Video: alle aktuellen Pis (Pi 3, 3B, 3B+, Zero 2 W, Pi 4,
+  CM4 mit HW-Decoder; Pi 5 in Software). HEVC ab Pi 4+.
 - Für Audio-Stream: Pi-Build mit `sys.provides("audio")`.
 
 ## Playlist-Format und Adressierung
@@ -455,25 +479,91 @@ Percent-Encoding im Basename (`cl%C3%A4p.mp4` → `cläp.mp4`) wird beim
 Erzeugen des Cache-Filenames aufgelöst, sodass URL-encoded und direkt
 UTF-8 angegebene Einträge auf denselben Slot abbilden.
 
+## Folien-Format-Allowlist
+
+Der Sidecar akzeptiert nur Playlist-Einträge, deren Endung in einer
+der beiden Allowlists steht:
+
+- **Bilder**: `.png`, `.jpg`, `.jpeg`
+- **Videos**: `.mp4`, `.m4v`, `.mov`
+
+Einträge mit anderen Endungen (`.webm`, `.mkv`, `.avi`, `.bmp`, `.gif`,
+`.tiff`, `.webp`, …) werden beim Parsen der Playlist mit Log-Hinweis
+übersprungen und gelangen **nicht** ins Manifest. Damit sieht der
+Renderer ausschließlich Folien mit zugesicherter Decoder-Unterstützung
+— kein "im Zweifel als Bild durchgereicht und scheitert spät".
+
+Codec-seitig erwartet info-beamer für Videos H.264 (Pi 3+) bzw.
+HEVC (Pi 4+). Abweichende Codecs in den zugelassenen Containern
+(z. B. HEVC-MP4 auf Pi 3) schlagen erst beim Decode-Versuch fehl —
+das ist Sache des Ablieferers.
+
 ## Caching-Verhalten
 
-- **Cache-Ort**: Folien werden mit `slide_`-Prefix direkt im Knoten-
+- **Cache-Ort**: Folien werden mit `slide-`-Prefix direkt im Knoten-
   Wurzelverzeichnis abgelegt (kein Subverzeichnis — info-beamer
   behandelt Subdirs als Child-Nodes und findet zur Laufzeit befüllte
   Dateien dort nicht zuverlässig).
 - **Download nur bei Bedarf**: der Cache-Filename ist der Basename des
   Playlist-Eintrags (s. *Playlist-Format und Adressierung*); der
   Service prüft vor jedem Download nur, ob die Datei existiert.
-- **Cache-GC**: nach jedem erfolgreichen Playlist-Fetch löscht der
-  Service alle Files mit `slide_`-Prefix, die nicht mehr in der
-  aktuellen Playlist stehen, sowie `.tmp`-Reste abgebrochener
-  Downloads. Wird bei HTTP-Fehler oder leerer Playlist übersprungen,
-  damit ein Server-Ausfall nicht den Cache wegwirft.
+- **Cache-GC mit Grace-Period**: nach jedem erfolgreichen Playlist-Fetch
+  pflegt der Service eine interne Schutzliste:
+  - Files in der aktuellen Playlist sind unbefristet geschützt.
+  - Files, die aus der Playlist gefallen sind, bleiben für **eine Stunde**
+    in der Schutzliste, bevor sie gelöscht werden — der Renderer arbeitet
+    mit einem Sliding-Window-Preload und kann eine entfallene Folie noch
+    aus der laufenden Vorgänger-Liste rendern wollen, bevor der Swap am
+    Cycle-Ende greift. Sofortiges Löschen würde solche Folien ihrer
+    Disk-Backing-Datei berauben.
+  - Files, die innerhalb der Grace-Period zurück in die Playlist kommen,
+    werden wieder unbefristet geschützt.
+  - `.tmp`-Reste abgebrochener Downloads werden weiterhin sofort entfernt
+    — sie sind nie Teil einer aktiven Playlist.
+  - Beim **ersten Lauf** nach Sidecar-Start werden alle bereits liegenden
+    Folien-Dateien (auch ohne aktuelle Playlist-Zuordnung) defensiv für
+    eine Stunde geschützt — verhindert, dass ein Service-Restart während
+    laufender Wiedergabe noch benötigte Folien killt.
+- **GC läuft nicht bei Server-Ausfall**: HTTP-Fehler oder leere Playlist
+  überspringen den GC-Pass, damit der Cache nicht wegen einer
+  Netzwerk-Hickup weggeworfen wird.
 - **Cache-Wipe bei Service-Update**: info-beamer entfernt alle vom
   Service erzeugten Files (außer `SCRATCH/`), wenn das Service-Skript
   aktualisiert wird. Folien werden dann beim ersten Polling neu
   heruntergeladen. Reine `node.lua`/`node.json`-Updates lassen den
   Cache intakt.
+
+## Robustheit & Fallback-Verhalten
+
+Mehrere Stufen schützen die Wiedergabe gegen Konfig-/Inhalts-/Hardware-
+Fehler:
+
+- **File-Keyed Cache bei Manifest-Updates**: liegt eine Folie in
+  alter und neuer Liste, übernimmt der Renderer die bereits dekodierte
+  GPU-Textur, statt sie zu disposen und neu zu laden. Manifest-Updates
+  mit großer Schnittmenge (typisch nach Sidecar-Restart oder
+  einzelnen Folien-Edits) verursachen damit keinen Re-Decode-Storm
+  und keinen sichtbaren Glitch beim Cycle-Wrap. Bei einer
+  byte-identischen Single-Video-Playlist nach Sidecar-Restart bleibt
+  der laufende Decoder sogar ungestört am Werk.
+- **IDLE→PLAYING ohne Schwarz-Frame**: nach einem leeren Manifest
+  oder beim ersten Manifest nach Knoten-Start zeigt der Player den
+  Backup-Inhalt so lange weiter, bis die erste Folie der neuen
+  Playlist tatsächlich draw-ready ist (Bilder: Decode fertig;
+  Videos: Decoder-Slot vorbereitet). Kein BG-only-Frame als Lücke.
+- **Watchdog "alle Slides failed"**: kann der Renderer über einen
+  kompletten Cycle (`#slides` Slide-Wechsel) keinen einzigen Frame
+  zeichnen — z. B. weil alle Folien-Dateien beschädigt sind oder
+  während laufender Wiedergabe vom Disk verschwinden — fällt er auf
+  den Backup-Inhalt zurück, statt den Bildschirm dauerhaft auf
+  reinem Hintergrund zu lassen. Sobald ein neues Manifest mit
+  brauchbaren Folien ankommt, übernimmt der reguläre IDLE→PLAYING-
+  Pfad.
+- **Kein Backup bei totem/blockiertem Sidecar**: wenn der Sidecar das
+  Manifest nicht mehr aktualisiert, läuft der Renderer auf den zuletzt
+  geladenen Folien weiter. Sidecar-Liveness-Detection ist bewusst
+  *nicht* implementiert — eine kurz hängende Sidecar-Iteration darf
+  nicht zum Backup-Wechsel führen.
 
 ## Lokales Testen mit info-beamer pi
 
