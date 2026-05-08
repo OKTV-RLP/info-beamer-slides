@@ -37,7 +37,7 @@ import requests
 import urllib3
 import pytz
 
-SLIDE_PREFIX = "slide_"
+SLIDE_PREFIX = "slide-"
 MANIFEST     = "manifest.json"
 CONFIG       = "config.json"
 
@@ -220,17 +220,13 @@ def slide_filename(name):
 # Allowlists fuer unterstuetzte Folien-Formate.
 #
 # IMAGE_EXTENSIONS: Endungen, die info-beamer ueber resource.load_image
-# zuverlaessig dekodiert. Beschraenkung auf PNG und JPEG ist bewusst
-# eng — andere Formate (BMP, GIF, WebP, TIFF) sind je nach
-# info-beamer-Build entweder gar nicht unterstuetzt oder schlagen beim
-# Decode mit unklarer Fehlermeldung fehl.
+# zuverlaessig dekodiert.
 #
 # VIDEO_EXTENSIONS: Endungen, die als Video-Container interpretiert
 # werden. Bewusst konservativ: info-beamer dokumentiert nur MP4 als
 # unterstuetzten Container fuer resource.load_video; m4v ist derselbe
 # Container mit anderem Suffix; mov teilt das ISO-BMFF-Boxen-Layout
-# und wird vom MMAL-Demuxer in der Praxis akzeptiert. webm/mkv/avi
-# sind in der info-beamer-Doku nirgendwo als unterstuetzt aufgefuehrt.
+# und wird vom MMAL-Demuxer in der Praxis akzeptiert.
 # Codec-Erwartung: H.264 fuer alle Pi-Versionen mit Hardware-Decoder;
 # HEVC nur Pi 4+ ab info-beamer hosted v10. Abweichende Codecs in den
 # zugelassenen Containern (z. B. HEVC-MP4 auf Pi 3) schlagen beim
@@ -593,9 +589,15 @@ def cache_gc(keep):
             new_protected[fname] = now_ts + SLIDE_GRACE_SECONDS
     else:
         # Eintraege aus dem vorigen Lauf carryen oder ablaufen lassen.
+        # Files, die zwischenzeitlich gar nicht mehr auf Disk liegen
+        # (manuell entfernt, FS-Korruption, ...), werden ebenfalls
+        # gedroppt — sonst wuechse _protected unbegrenzt mit toten
+        # Eintraegen, fuer die es nichts zu schuetzen gibt.
         for fname, prev_val in _protected.items():
             if fname in new_protected:
                 continue                              # wieder in Playlist → keep-Schutz
+            if fname not in seen_files:
+                continue                              # File nicht mehr auf Disk → toter Eintrag
             if prev_val is None:
                 # War in Playlist, ist jetzt rausgefallen → Grace starten.
                 new_protected[fname] = now_ts + SLIDE_GRACE_SECONDS

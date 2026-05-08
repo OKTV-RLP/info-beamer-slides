@@ -1842,7 +1842,14 @@ function node.render()
                 swap_slides(pending_slides)
                 pending_slides            = nil
                 current_idx               = 1
-                slide_started             = now()
+                -- Zeitbasis innerhalb des Render-Ticks konsistent
+                -- halten: Frame-Zeitstempel t (aus dem Frame-Start)
+                -- verwenden, nicht now() — sonst laege slide_started
+                -- ein paar Mikrosekunden NACH t, und der erste
+                -- elapsed=t-slide_started im PLAYING-Pfad waere
+                -- minimal negativ (kann Fade-/Advance-Logik
+                -- inkonsistent stossen).
+                slide_started             = t
                 slide_drew                = false
                 consecutive_failed_slides = 0
                 state                     = STATE_PLAYING
