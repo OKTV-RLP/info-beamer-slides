@@ -181,23 +181,31 @@ local cycle_fade_start = 0
 --     BG erst in N+2 weg (Compositor-Lag). 1 Frame "nur BG".
 --   * FG-Video -> Image+BG: FG weg in N+1, Image sofort gezeichnet,
 --     BG-Video poppt in N+k rein (loading->playing).
--- Image-Hold beim Image->Video-Wechsel mit Video-BG: das alte Image
--- wird auf der GL-Surface weiter gezeichnet, bis das neue FG-Video
--- placeable ist (oder die Hold-Deadline erreicht). Vorher war das ein
--- 1-Frame-Hold gegen den Compositor-Lag des BG-Dispose; reicht aber
--- nicht, wenn der FG-Decoder mehrere Frames im "loading"-State braucht
--- (Pi 3B: typisch 200-400 ms). Multi-Frame-Hold haelt bis zum ersten
--- placeable-Frame oder bis zum Timeout — danach wird die Resource ggf.
--- disposed (s. dispose_after-Flag).
+-- Image-Hold beim Image->Video-Wechsel: das alte Image wird auf der
+-- GL-Surface weiter gezeichnet, um den Uebergang zum gerade ladenden
+-- FG-Video zu ueberbruecken. Hold-Modus haengt vom BG-Typ ab:
+--
+--   * BG-Image  (one_shot=false): Multi-Frame-Hold bis FG placeable
+--     oder bis Hold-Deadline (Sicherheits-Timeout). BG-Image und
+--     Hold bleiben gemeinsam sichtbar bis das Video uebernimmt — kein
+--     "BG-allein"-Zwischenframe.
+--   * BG-Video  (one_shot=true): 1-Frame-Hold als reine Compositor-
+--     Lag-Kompensation. background_yield disposed das BG-Video, der
+--     Compositor zieht das Layer aber erst einen Frame spaeter ab —
+--     der Hold deckt genau dieses eine Frame, sodass FG-Image und
+--     BG-Video synchron verschwinden. Danach Schwarz, bis FG ready.
 --
 -- Felder:
 --   res           = Image-Resource (Userdata)
---   deadline      = sys.now()-Zeitpunkt fuer Sicherheits-Timeout
+--   deadline      = sys.now()-Zeitpunkt fuer Sicherheits-Timeout im
+--                   Multi-Frame-Modus
 --   dispose_after = true, sobald reconcile_window oder swap_slides
 --                   die Resource aus ihrem urspruenglichen Slot
 --                   entfernen wuerden — der Hold uebernimmt dann die
 --                   Disposal-Verantwortung beim Aufloesen
---                   (analog zum outgoing-Mechanismus).
+--                   (analog zum outgoing-Mechanismus)
+--   one_shot      = true: nach einem Render-Frame clearen
+--                   false: bis video_ready oder deadline halten
 local pending_image_hold = nil
 local PENDING_IMAGE_HOLD_TIMEOUT = 1.0  -- s, deutlich groesser als
                                         -- typische FG-Video-Loading-
@@ -2233,13 +2241,13 @@ function node.render()
                 --   bis das Video uebernehmen kann — kein "BG-allein"-
                 --   Zwischenframe.
                 -- * BG-Video (one_shot=true): 1-Frame-Hold als reine
-                --   Compositor-Lag-Kompensation, identisch zum bisherigen
-                --   master-Verhalten. Deckt das eine Frame ab, in dem
-                --   :dispose des BG-Videos noch nicht durch den
-                --   Compositor durchgeschlagen ist; danach soll FG und
-                --   BG synchron verschwinden (= Schwarz, bis FG kommt).
-                --   Ein Multi-Frame-Hold waere hier asymmetrisch:
-                --   BG-Video weg, aber Image-Folie noch sichtbar.
+                --   Compositor-Lag-Kompensation. Deckt das eine Frame
+                --   ab, in dem :dispose des BG-Videos noch nicht durch
+                --   den Compositor durchgeschlagen ist; danach sollen
+                --   FG und BG synchron verschwinden (= Schwarz, bis
+                --   FG kommt). Ein Multi-Frame-Hold waere hier
+                --   asymmetrisch: BG-Video weg, aber Image-Folie noch
+                --   sichtbar.
                 --
                 -- Bei Video->Video (last_cur war Video, kein Hold-Quelle)
                 -- wird ueberhaupt kein Hold gesetzt — Schwarz waehrend
