@@ -604,14 +604,22 @@ Fehler:
   reinem Hintergrund zu lassen. Sobald ein neues Manifest mit
   brauchbaren Folien ankommt, übernimmt der reguläre IDLE→PLAYING-
   Pfad.
-- **Nahtlose Image↔Video-Übergänge bei BG-Image**: ein einzelnes
+- **Nahtloser Image→Video-Übergang bei BG-Image**: ein einzelnes
   FG-Video zwischen Image-Folien mit konfiguriertem Image-Hintergrund
   wechselt komplett ohne Schwarz-Frames. Während das FG-Video hochlädt,
-  bleibt der BG sichtbar und die alte Image-Folie wird als Hold
-  weiterhin gezeichnet, bis das Video übernehmen kann (Multi-Frame-
-  Hold mit 1 s Sicherheits-Timeout). Beim Verlassen der Video-Folie
-  greift die existierende `bg_resume_gate`-Logik bei Video-BG; bei
-  Image-BG ist nichts zu warten.
+  bleiben BG-Image und die alte Image-Folie als kombiniertes Frame
+  sichtbar (Multi-Frame-Hold mit 1 s Sicherheits-Timeout), bis das
+  Video übernehmen kann. Beim Verlassen der Video-Folie greift bei
+  Video-BG die existierende `bg_resume_gate`-Logik; bei Image-BG ist
+  nichts zu warten.
+- **Synchroner Schnitt bei BG-Video-Konfiguration**: bei BG-Video
+  ist beim Eintritt in eine FG-Video-Folie für ein einzelnes Frame
+  der Compositor-Lag des BG-Dispose abgedeckt (alte Image-Folie wird
+  einmal nachgezeichnet); danach verschwinden BG-Video und FG-Image
+  synchron, der Schirm bleibt schwarz, bis das neue FG-Video sein
+  erstes Frame liefert. Multi-Frame-Hold wäre hier asymmetrisch
+  (Image-Folie würde länger als das BG-Video sichtbar bleiben),
+  daher der knappe Compositor-Lag-Fix.
 - **Schwarz zwischen aufeinanderfolgenden Video-Folien**: bei
   zwei direkt aufeinanderfolgenden Video-Folien wird der Bildschirm
   während des Loading-Fensters bewusst schwarz — Vordergrund- und
