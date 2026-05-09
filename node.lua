@@ -2493,9 +2493,12 @@ function node.render()
 
     -- Pegel-Anwendung am Frame-Ende: damit ein in dieser Render-Phase
     -- ausgeloester Slide-Wechsel (fg_video_load setzt fg_video.res)
-    -- noch im SELBEN Frame den Ducking-Fade startet — sonst entstuende
-    -- ein Frame Latenz zwischen visuellem Wechsel auf den FG-Layer und
-    -- Beginn der Pegelabsenkung.
+    -- noch im SELBEN Frame den Ducking-Fade startet. Trigger ist der
+    -- Lade-Beginn des FG-Videos, nicht der erste sichtbare FG-Frame —
+    -- der Decoder braucht typisch 200-400 ms (Pi 3B), in denen
+    -- pending_image_hold bzw. Schwarz die Bruecke uebernimmt.
+    -- Akustisch leitet der Fade die Video-Folie damit etwas vor der
+    -- visuellen Sichtbarkeit ein.
     apply_audio_levels()
 
     -- Sliding-Window am Frame-Ende abgleichen. Ab hier wird im Frame
