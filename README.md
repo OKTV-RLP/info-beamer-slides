@@ -604,6 +604,21 @@ Fehler:
   reinem Hintergrund zu lassen. Sobald ein neues Manifest mit
   brauchbaren Folien ankommt, übernimmt der reguläre IDLE→PLAYING-
   Pfad.
+- **Nahtlose Image↔Video-Übergänge bei BG-Image**: ein einzelnes
+  FG-Video zwischen Image-Folien mit konfiguriertem Image-Hintergrund
+  wechselt komplett ohne Schwarz-Frames. Während das FG-Video hochlädt,
+  bleibt der BG sichtbar und die alte Image-Folie wird als Hold
+  weiterhin gezeichnet, bis das Video übernehmen kann (Multi-Frame-
+  Hold mit 1 s Sicherheits-Timeout). Beim Verlassen der Video-Folie
+  greift die existierende `bg_resume_gate`-Logik bei Video-BG; bei
+  Image-BG ist nichts zu warten.
+- **Schwarz zwischen aufeinanderfolgenden Video-Folien**: bei
+  zwei direkt aufeinanderfolgenden Video-Folien wird der Bildschirm
+  während des Loading-Fensters bewusst schwarz — Vordergrund- und
+  Hintergrund-Layer verschwinden synchron, statt dass der BG kurz
+  zwischen den Videos aufflackert. Symmetrie-Garantie: BG-Image ist
+  während einer Video-Folie nie sichtbar (würde während des
+  Übergangs kurz wieder erscheinen, was visuell unruhig wirkt).
 - **Kein Backup bei totem/blockiertem Sidecar**: wenn der Sidecar das
   Manifest nicht mehr aktualisiert, läuft der Renderer auf den zuletzt
   geladenen Folien weiter. Sidecar-Liveness-Detection ist bewusst
