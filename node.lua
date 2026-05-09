@@ -2222,33 +2222,58 @@ function node.render()
             end
 
             if not can_preserve then
-                -- Image->Video bei Video-BG: alte Image-Folie auf der
-                -- GL-Surface weiter zeichnen, bis das neue FG-Video
-                -- placeable ist (oder die Hold-Deadline erreicht).
-                -- Vorher war das ein 1-Frame-Hold gegen den Compositor-
-                -- Lag des BG-Dispose; reicht aber nicht, wenn der FG-
-                -- Decoder mehrere Frames im "loading"-State braucht.
-                -- Nur bei Video-BG: Image-BG hat keinen Compositor-Lag
-                -- (verschwindet synchron mit der GL-Surface via clear)
-                -- UND bleibt durch das show_video-Coupling waehrend des
-                -- Loadings auf Layer 0 sichtbar — dort waere ein Hold
-                -- unnoetig und koennte ein bereits placeable FG-Video
-                -- verdecken. Pruefung muss VOR background_yield() laufen,
-                -- weil yield() background_slot auf nil setzt.
+                -- Image->Video: alte Image-Folie als Hold halten, bis
+                -- das neue FG-Video placeable ist (oder die Hold-
+                -- Deadline erreicht). Hold wird unabhaengig vom BG-Typ
+                -- gesetzt und markiert damit gleichzeitig, dass wir
+                -- uns im Image->Video-Uebergang befinden:
                 --
-                -- Disposal-Verantwortung fuer last_cur.res bleibt
-                -- zunaechst beim Slide-Slot; faellt der Slot waehrend
-                -- des Holds aus dem Window (reconcile_window) oder wird
-                -- per swap_slides ersetzt, uebernimmt der Hold die
-                -- Disposal via dispose_after-Flag (s. dispose_slot_
-                -- resource und swap_slides).
+                -- * Bei Image-BG zeichnet der Render-Pfad waehrend
+                --   des Loadings BG + Hold weiter (= vorheriges Frame).
+                --   Sobald video_ready erreicht ist, wird der Hold
+                --   geloescht UND der BG nicht mehr gezeichnet (FG
+                --   deckt voll). FG und BG verschwinden damit synchron.
+                -- * Bei Video-BG ist BG via background_yield disposed;
+                --   draw_slot ist No-op. Der Hold liefert das alte
+                --   Image als Brueckeninhalt.
+                --
+                -- Bei Video->Video (last_cur war Video, kein Hold) wird
+                -- BG waehrend des Loadings NICHT gezeichnet — Schwarz
+                -- ist im Video-zu-Video-Uebergang gewollt, damit FG
+                -- und BG synchron weg/da sind.
+                --
+                -- Quelle: bevorzugt last_cur.res (Standard-Fall). Beim
+                -- Cycle-Wrap setzt der Advance-Pfad last_cur=nil — dann
+                -- liegt die letzte Image-Folie der alten Liste in
+                -- outgoing.res. Disposal-Verantwortung wird vom
+                -- outgoing zum Hold gehandoffed (outgoing.dispose_after
+                -- wandert in den Hold; outgoing.dispose_after danach
+                -- false, damit end_cycle_fade nichts disposed).
+                --
+                -- Pruefung muss VOR background_yield() laufen, weil
+                -- yield() background_slot auf nil setzt — das beein-
+                -- flusst zwar die Hold-Bedingung nicht mehr, aber wir
+                -- behalten die Reihenfolge konsistent zur frueheren
+                -- Variante.
                 clear_pending_image_hold()
-                if last_cur and last_cur.kind == "image" and last_cur.res
-                   and background_slot.kind == "video" and background_slot.res then
+                local hold_res, hold_dispose_after = nil, false
+                if last_cur and last_cur.kind == "image" and last_cur.res then
+                    hold_res = last_cur.res
+                elseif outgoing and outgoing.kind == "image" and outgoing.res then
+                    -- Cycle-Wrap-Pfad: last_cur ist nil, outgoing
+                    -- haelt die letzte Image-Folie der alten Liste.
+                    -- Wir uebernehmen Disposal-Verantwortung —
+                    -- outgoing wird im Render-Pfad direkt danach via
+                    -- end_cycle_fade aufgeloest.
+                    hold_res            = outgoing.res
+                    hold_dispose_after  = outgoing.dispose_after or false
+                    outgoing.dispose_after = false
+                end
+                if hold_res then
                     pending_image_hold = {
-                        res           = last_cur.res,
+                        res           = hold_res,
                         deadline      = t + PENDING_IMAGE_HOLD_TIMEOUT,
-                        dispose_after = false,
+                        dispose_after = hold_dispose_after,
                     }
                 end
                 background_yield()
@@ -2303,39 +2328,36 @@ function node.render()
         last_cur = cur
     end
 
-    -- video_ready=true: FG-Video vom Compositor placeable
-    -- (state ∈ {loaded, paused, playing, finished}) — BG nicht
-    -- zeichnen, FG deckt den Schirm. video_ready=false bei Video-Slide:
-    -- Lade-Fehler oder noch im "loading"-State (Decoder waermt sich auf,
-    -- Frame-Groesse noch unbekannt) — BG als sichtbarer Untergrund
-    -- zeichnen, sonst entstuende ein schwarzer Frame zwischen Slide-
-    -- Wechsel und erstem :place-faehigem Frame des neuen Videos.
+    -- BG-Zeichnen-Logik:
+    --   * Image-Folie (cur.kind ~= "video"): BG immer als Untergrund
+    --     zeichnen (Standard-Pfad).
+    --   * Video-Folie:
+    --       - Image->Video-Uebergang (pending_image_hold gesetzt) und
+    --         Video noch nicht placeable: BG zeichnen, damit der
+    --         Uebergang nahtlos ist (Image-BG bleibt sichtbar bis
+    --         FG-Video uebernimmt; Video-BG ist dort yielded → no-op).
+    --       - sonst (video_ready=true ODER Video->Video-Uebergang):
+    --         BG NICHT zeichnen. FG und BG verschwinden bzw. erscheinen
+    --         damit synchron — zwischen zwei Videos bleibt der Schirm
+    --         schwarz (gewollt: kein BG-Wechsel-Flackern, das nur
+    --         waehrend Video-Loading sichtbar waere).
     --
-    -- Visueller Fallback waehrend Loading, in Reihenfolge:
-    --   1. Image-BG: bleibt durch dieses show-Coupling auf Layer 0
-    --      sichtbar. Auch nach Image->Video-Wechsel ohne yield.
-    --   2. Video-BG via background_yield disposed: draw_slot ist
-    --      No-op. Dann uebernimmt im cur.kind=="video"-Block:
-    --        a) pending_image_hold (Image->Video-Hold ueber mehrere
-    --           Frames bis video_ready oder Hold-Timeout)
-    --        b) Backup-Image (Video->Video bei Video-BG, kein Hold
-    --           verfuegbar, weil last_cur ein Video war)
-    --        c) Schwarz, wenn keiner der Fallbacks greift (Pi 3B mit
-    --           Video-BG + Backup-Video — Backup-Video kollidiert mit
-    --           dem FG-Decoder; dieses Setup laesst sich nicht ohne
-    --           Konfig-Wechsel auf Backup-Image absichern).
+    -- Damit gilt visuell: BG-Image ist sichtbar, solange eine Image-
+    -- Folie laeuft, und unsichtbar, solange eine Video-Folie laeuft —
+    -- der Hold ueberbrueckt nur den asymmetrischen Loading-Frame im
+    -- Image->Video-Uebergang.
     local video_ready = (cur.kind == "video")
                         and video_placeable(fg_video.res)
-    if not video_ready then
+    local draw_bg = (cur.kind ~= "video")
+                    or (not video_ready and pending_image_hold ~= nil)
+    if draw_bg then
         draw_slot(background_slot, 1)
     end
 
     if cur.kind == "video" then
         -- Hard-Cut zur Video-Folie: laufenden Cycle-Fade verwerfen,
         -- GL-Surface bleibt transparent (Folie wird NICHT gezeichnet),
-        -- damit das FG-Video auf Layer -1 voll sichtbar ist. Bei Lade-
-        -- Fehler bleibt zumindest das BG sichtbar, bis im naechsten
-        -- Frame der should_advance-Pfad weiterspringt.
+        -- damit das FG-Video auf Layer -1 voll sichtbar ist.
         --
         -- pending_image_hold zeichnet die alte Image-Folie weiter,
         -- bis das neue FG-Video placeable ist (oder die Hold-Deadline
@@ -2348,22 +2370,6 @@ function node.render()
             else
                 pcall(function() draw_fit(pending_image_hold.res, 1) end)
             end
-        end
-
-        -- Backup-Image-Fallback fuer Video->Video mit Video-BG: BG ist
-        -- yielded (background_slot.res=nil), kein pending_image_hold
-        -- verfuegbar (last_cur war Video, keine Image-Resource zu
-        -- halten). Ohne diesen Pfad waere der Schirm waehrend des
-        -- Loadings komplett schwarz. Backup-Video wird hier bewusst
-        -- NICHT genutzt: dessen Decoder-Slot kann mit dem ladenden
-        -- FG-Video kollidieren (Pi-3B-Engpass).
-        if not video_ready
-           and not pending_image_hold
-           and bg_yielded_state
-           and backup_slot.kind == "image" and backup_slot.res then
-            pcall(function()
-                backup_slot.res:draw(0, 0, WIDTH, HEIGHT, 1)
-            end)
         end
 
         end_cycle_fade()
