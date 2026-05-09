@@ -101,10 +101,29 @@ local background_slot = { res = nil, kind = nil, file = nil, label = "Hintergrun
 -- BG-Video MUSS vor dem Load via background_yield() freigegeben werden,
 -- weil Pi 3B nur einen H.264-Decoder hat. looped=false → das Video laeuft
 -- bis :state() == "finished", dann advanced der Render-Loop.
+--
+-- Mess-Felder fuer Diagnose-Logging:
+--   * load_started_at  : sys.now() nach erfolgreichem fg_video_load
+--   * first_placed_at  : sys.now() beim ersten Render-Frame mit
+--                        video_placeable=true (= erster sichtbarer
+--                        Decoder-Frame)
+--   * last_placed_at   : sys.now() im aktuellen Render-Tick, solange
+--                        das Video placeable ist. Wird pro Frame
+--                        ueberschrieben — beim fg_video_unload steht
+--                        damit der Zeitstempel des letzten sichtbaren
+--                        Frames.
+-- Daraus zwei Log-Werte:
+--   first_placed_at - load_started_at = Decoder-Spinup-Zeit
+--   last_placed_at  - first_placed_at = sichtbare Abspieldauer
+-- Hilft bei Tuning des PENDING_IMAGE_HOLD_TIMEOUT und Erkennung
+-- problematischer Videos.
 local fg_video = {
-    res   = nil,
-    file  = nil,
-    layer = -1,
+    res             = nil,
+    file            = nil,
+    layer           = -1,
+    load_started_at = nil,
+    first_placed_at = nil,
+    last_placed_at  = nil,
 }
 
 -- Optionales Zeit-Overlay. Wird im PLAYING-Zustand über den Folien
@@ -1420,8 +1439,24 @@ local function fg_video_unload()
     if fg_video.res then
         pcall(function() fg_video.res:place(0, 0, 0, 0) end)
         pcall(function() fg_video.res:dispose() end)
+        -- Sichtbare Abspieldauer (erstes bis letztes placeable Frame)
+        -- loggen, sofern das Video tatsaechlich mindestens einen Frame
+        -- gezeigt hat. Bei fehlgeschlagenem Load oder reinem Loading-
+        -- Abbruch (Video wird disposed bevor jemals placeable) bleibt
+        -- die Log-Zeile aus.
+        if fg_video.first_placed_at and fg_video.last_placed_at then
+            print(string.format(
+                "FG-Video '%s' visible %.3f s (Decoder-Spinup %.3f s)",
+                tostring(fg_video.file),
+                fg_video.last_placed_at - fg_video.first_placed_at,
+                (fg_video.first_placed_at - (fg_video.load_started_at or fg_video.first_placed_at))
+            ))
+        end
     end
     fg_video.res, fg_video.file = nil, nil
+    fg_video.load_started_at = nil
+    fg_video.first_placed_at = nil
+    fg_video.last_placed_at  = nil
 end
 
 -- FG-Video laden und starten. looped=false → laeuft bis "finished",
@@ -1455,6 +1490,8 @@ local function fg_video_load(slide, looped)
         pcall(function() r:layer(fg_video.layer) end)
         pcall(function() r:start() end)
         fg_video.res, fg_video.file = r, slide.file
+        fg_video.load_started_at = sys.now()
+        fg_video.first_placed_at = nil
         return true
     end
     print("FG-Video nicht ladbar: " .. tostring(slide.file))
@@ -2382,6 +2419,18 @@ function node.render()
                 pcall(function() draw_fit(pending_image_hold.res, 1) end)
                 clear_pending_image_hold()
             elseif video_ready or t >= pending_image_hold.deadline then
+                -- Hold endet: entweder weil Video placeable ist (Normal-
+                -- fall) oder weil der Sicherheits-Timeout erreicht ist
+                -- (Diagnose-Log: hilft, einen pathologisch langsamen
+                -- Decoder zu erkennen, der den Hold nicht mehr
+                -- ueberbruecken konnte).
+                if not video_ready and fg_video.load_started_at then
+                    print(string.format(
+                        "FG-Video '%s' Hold-Timeout nach %.3f s (Decoder noch nicht placeable)",
+                        tostring(fg_video.file),
+                        t - fg_video.load_started_at
+                    ))
+                end
                 clear_pending_image_hold()
             else
                 pcall(function() draw_fit(pending_image_hold.res, 1) end)
@@ -2392,6 +2441,22 @@ function node.render()
         if video_ready then
             pcall(function() fg_video.res:place(0, 0, WIDTH, HEIGHT) end)
             slide_drew = true
+            -- Diagnose-Logging zur Decoder-Spinup-Zeit: einmal pro
+            -- Slide-Eintritt, beim ersten placeable-Frame. Hilft bei
+            -- Tuning des PENDING_IMAGE_HOLD_TIMEOUT und Erkennung
+            -- problematischer Videos.
+            if not fg_video.first_placed_at and fg_video.load_started_at then
+                fg_video.first_placed_at = t
+                print(string.format(
+                    "FG-Video '%s' loading->placeable in %.3f s",
+                    tostring(fg_video.file),
+                    t - fg_video.load_started_at
+                ))
+            end
+            -- last_placed_at pro Frame mitziehen, damit fg_video_unload
+            -- die sichtbare Abspieldauer (erstes bis letztes placeable
+            -- Frame) loggen kann.
+            fg_video.last_placed_at = t
         end
     else
         -- Gate aufloesen, sobald BG-Video placeable ist (oder Timeout).
