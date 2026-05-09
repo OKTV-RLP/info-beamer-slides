@@ -446,7 +446,7 @@ end
 -- Image-Resource eines Slots freigeben, mit Handoff fuer
 -- weiterlaufende Referenzen:
 --   * outgoing            : Cycle-Crossfade-Quelle
---   * pending_image_hold  : Multi-Frame-Hold beim Image->Video-Wechsel
+--   * pending_image_hold  : Image-Hold beim Image->Video-Wechsel
 -- In beiden Faellen markieren wir dispose_after, statt direkt zu
 -- disposen — der jeweilige Aufloeser uebernimmt die Verantwortung,
 -- sobald die Referenz nicht mehr gebraucht wird. Sonst wuerde der
@@ -2191,13 +2191,13 @@ function node.render()
         end
         -- Window-Reconcile passiert am Frame-Ende, NACH dem Render.
         -- Grund: der Slide-Wechsel-Hook (s. unten) kann last_cur.res
-        -- in pending_image_hold einhaengen (Multi-Frame-Hold beim
-        -- Image+BG-Video -> FG-Video-Wechsel), und der Hold wird ab
-        -- dem aktuellen Frame gerendert. Wuerde reconcile hier laufen,
-        -- koennte es last_cur disposen, bevor der erste Hold-Frame
-        -- zeichnet. Das Hold-Konstrukt selbst schuetzt die Resource
-        -- ueber dispose_after gegen spaetere Disposal-Aufrufe (s.
-        -- dispose_slot_resource und swap_slides).
+        -- in pending_image_hold einhaengen (Image-Hold beim
+        -- Image->Video-Wechsel; gilt fuer beide BG-Typen), und der
+        -- Hold wird ab dem aktuellen Frame gerendert. Wuerde reconcile
+        -- hier laufen, koennte es last_cur disposen, bevor der erste
+        -- Hold-Frame zeichnet. Das Hold-Konstrukt selbst schuetzt die
+        -- Resource ueber dispose_after gegen spaetere Disposal-Aufrufe
+        -- (s. dispose_slot_resource und swap_slides).
     end
 
     -- Slide-Wechsel-Hook: Video-Folien benoetigen explizite Decoder-

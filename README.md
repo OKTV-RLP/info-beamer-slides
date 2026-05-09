@@ -624,9 +624,14 @@ Fehler:
   zwei direkt aufeinanderfolgenden Video-Folien wird der Bildschirm
   während des Loading-Fensters bewusst schwarz — Vordergrund- und
   Hintergrund-Layer verschwinden synchron, statt dass der BG kurz
-  zwischen den Videos aufflackert. Symmetrie-Garantie: BG-Image ist
-  während einer Video-Folie nie sichtbar (würde während des
-  Übergangs kurz wieder erscheinen, was visuell unruhig wirkt).
+  zwischen den Videos aufflackert. Bei einer placeable laufenden
+  FG-Video-Folie ist der BG ohnehin nicht sichtbar (FG deckt den
+  Schirm); Video→Video-Übergänge bleiben daher symmetrisch dazu,
+  ohne kurzes BG-Aufflackern im Loading-Fenster. Im Image→Video-
+  Eintritt zeigt der Hold (s. erster Bullet) BG-Image und alte
+  Image-Folie weiter, weil dort die Vorgängerfolie selbst schon
+  durch den BG hindurchschien — BG bleibt in dieser Phase also
+  konsistent zum vorherigen Frame sichtbar.
 - **Kein Backup bei totem/blockiertem Sidecar**: wenn der Sidecar das
   Manifest nicht mehr aktualisiert, läuft der Renderer auf den zuletzt
   geladenen Folien weiter. Sidecar-Liveness-Detection ist bewusst
