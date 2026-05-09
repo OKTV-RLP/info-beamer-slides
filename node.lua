@@ -2222,58 +2222,58 @@ function node.render()
             end
 
             if not can_preserve then
-                -- Image->Video: alte Image-Folie als Hold halten, bis
-                -- das neue FG-Video placeable ist (oder die Hold-
-                -- Deadline erreicht). Hold wird unabhaengig vom BG-Typ
-                -- gesetzt und markiert damit gleichzeitig, dass wir
-                -- uns im Image->Video-Uebergang befinden:
+                -- Image->Video: alte Image-Folie als Hold halten und
+                -- gleichzeitig damit "wir sind im Image->Video-Uebergang"
+                -- markieren. Hold-Modus haengt vom BG-Typ ab:
                 --
-                -- * Bei Image-BG zeichnet der Render-Pfad waehrend
-                --   des Loadings BG + Hold weiter (= vorheriges Frame).
-                --   Sobald video_ready erreicht ist, wird der Hold
-                --   geloescht UND der BG nicht mehr gezeichnet (FG
-                --   deckt voll). FG und BG verschwinden damit synchron.
-                -- * Bei Video-BG ist BG via background_yield disposed;
-                --   draw_slot ist No-op. Der Hold liefert das alte
-                --   Image als Brueckeninhalt.
+                -- * BG-Image (one_shot=false): Multi-Frame-Hold bis das
+                --   FG-Video placeable ist oder die Hold-Deadline
+                --   erreicht. Damit bleibt die volle Optik des
+                --   vorherigen Frames (BG-Image + Image-Folie) erhalten,
+                --   bis das Video uebernehmen kann — kein "BG-allein"-
+                --   Zwischenframe.
+                -- * BG-Video (one_shot=true): 1-Frame-Hold als reine
+                --   Compositor-Lag-Kompensation, identisch zum bisherigen
+                --   master-Verhalten. Deckt das eine Frame ab, in dem
+                --   :dispose des BG-Videos noch nicht durch den
+                --   Compositor durchgeschlagen ist; danach soll FG und
+                --   BG synchron verschwinden (= Schwarz, bis FG kommt).
+                --   Ein Multi-Frame-Hold waere hier asymmetrisch:
+                --   BG-Video weg, aber Image-Folie noch sichtbar.
                 --
-                -- Bei Video->Video (last_cur war Video, kein Hold) wird
-                -- BG waehrend des Loadings NICHT gezeichnet — Schwarz
-                -- ist im Video-zu-Video-Uebergang gewollt, damit FG
-                -- und BG synchron weg/da sind.
+                -- Bei Video->Video (last_cur war Video, kein Hold-Quelle)
+                -- wird ueberhaupt kein Hold gesetzt — Schwarz waehrend
+                -- des Loadings, FG/BG synchron.
                 --
-                -- Quelle: bevorzugt last_cur.res (Standard-Fall). Beim
-                -- Cycle-Wrap setzt der Advance-Pfad last_cur=nil — dann
-                -- liegt die letzte Image-Folie der alten Liste in
-                -- outgoing.res. Disposal-Verantwortung wird vom
-                -- outgoing zum Hold gehandoffed (outgoing.dispose_after
-                -- wandert in den Hold; outgoing.dispose_after danach
-                -- false, damit end_cycle_fade nichts disposed).
+                -- Hold-Quelle: bevorzugt last_cur.res. Am Cycle-Wrap
+                -- setzt der Advance-Pfad last_cur=nil — dann liegt die
+                -- letzte Image-Folie der alten Liste in outgoing.res.
+                -- Disposal-Verantwortung wird vom outgoing zum Hold
+                -- gehandoffed (outgoing.dispose_after wandert in Hold;
+                -- outgoing-seitig auf false gesetzt, damit end_cycle_fade
+                -- danach nichts disposed).
                 --
                 -- Pruefung muss VOR background_yield() laufen, weil
-                -- yield() background_slot auf nil setzt — das beein-
-                -- flusst zwar die Hold-Bedingung nicht mehr, aber wir
-                -- behalten die Reihenfolge konsistent zur frueheren
-                -- Variante.
+                -- yield() background_slot.kind auf nil setzt — der
+                -- one_shot-Modus haengt aber genau an background_slot.
+                -- kind=="video".
                 clear_pending_image_hold()
                 local hold_res, hold_dispose_after = nil, false
                 if last_cur and last_cur.kind == "image" and last_cur.res then
                     hold_res = last_cur.res
                 elseif outgoing and outgoing.kind == "image" and outgoing.res then
-                    -- Cycle-Wrap-Pfad: last_cur ist nil, outgoing
-                    -- haelt die letzte Image-Folie der alten Liste.
-                    -- Wir uebernehmen Disposal-Verantwortung —
-                    -- outgoing wird im Render-Pfad direkt danach via
-                    -- end_cycle_fade aufgeloest.
                     hold_res            = outgoing.res
                     hold_dispose_after  = outgoing.dispose_after or false
                     outgoing.dispose_after = false
                 end
                 if hold_res then
+                    local is_video_bg = (background_slot.kind == "video"
+                                         and background_slot.res ~= nil)
                     pending_image_hold = {
                         res           = hold_res,
                         deadline      = t + PENDING_IMAGE_HOLD_TIMEOUT,
                         dispose_after = hold_dispose_after,
+                        one_shot      = is_video_bg,
                     }
                 end
                 background_yield()
@@ -2331,21 +2331,22 @@ function node.render()
     -- BG-Zeichnen-Logik:
     --   * Image-Folie (cur.kind ~= "video"): BG immer als Untergrund
     --     zeichnen (Standard-Pfad).
-    --   * Video-Folie:
-    --       - Image->Video-Uebergang (pending_image_hold gesetzt) und
-    --         Video noch nicht placeable: BG zeichnen, damit der
-    --         Uebergang nahtlos ist (Image-BG bleibt sichtbar bis
-    --         FG-Video uebernimmt; Video-BG ist dort yielded → no-op).
-    --       - sonst (video_ready=true ODER Video->Video-Uebergang):
-    --         BG NICHT zeichnen. FG und BG verschwinden bzw. erscheinen
-    --         damit synchron — zwischen zwei Videos bleibt der Schirm
-    --         schwarz (gewollt: kein BG-Wechsel-Flackern, das nur
-    --         waehrend Video-Loading sichtbar waere).
-    --
-    -- Damit gilt visuell: BG-Image ist sichtbar, solange eine Image-
-    -- Folie laeuft, und unsichtbar, solange eine Video-Folie laeuft —
-    -- der Hold ueberbrueckt nur den asymmetrischen Loading-Frame im
-    -- Image->Video-Uebergang.
+    --   * Video-Folie waehrend Image->Video-Uebergang
+    --     (pending_image_hold gesetzt) UND noch nicht placeable:
+    --     BG zeichnen.
+    --       - Bei BG-Image (Multi-Frame-Hold) bleibt das BG-Image
+    --         im Loading-Fenster sichtbar, das Hold-Image wird drueber
+    --         gezeichnet — Optik des vorherigen Frames bleibt voll
+    --         erhalten, bis FG uebernimmt.
+    --       - Bei BG-Video (1-Frame-Hold) ist BG via background_yield
+    --         disposed → draw_slot ist No-op. Der eine Hold-Frame deckt
+    --         den Compositor-Lag des BG-Dispose ab; danach wird
+    --         pending_image_hold gleich gecleared, draw_bg im naechsten
+    --         Frame false → Schwarz, bis FG ready.
+    --   * Video-Folie sonst (video_ready=true ODER kein Hold = Video->
+    --     Video): BG NICHT zeichnen. FG und BG verschwinden bzw.
+    --     erscheinen synchron; zwischen zwei Videos bleibt der Schirm
+    --     schwarz, statt BG kurz aufflackern zu lassen.
     local video_ready = (cur.kind == "video")
                         and video_placeable(fg_video.res)
     local draw_bg = (cur.kind ~= "video")
@@ -2359,13 +2360,20 @@ function node.render()
         -- GL-Surface bleibt transparent (Folie wird NICHT gezeichnet),
         -- damit das FG-Video auf Layer -1 voll sichtbar ist.
         --
-        -- pending_image_hold zeichnet die alte Image-Folie weiter,
-        -- bis das neue FG-Video placeable ist (oder die Hold-Deadline
-        -- erreicht — Sicherheits-Timeout fuer ein nie ladendes Video).
+        -- pending_image_hold zeichnet die alte Image-Folie:
+        --   * one_shot=true (BG-Video): genau einen Frame zeichnen
+        --     und sofort clearen — Compositor-Lag-Kompensation, danach
+        --     synchroner Schwarz-Frame bis FG ready.
+        --   * one_shot=false (BG-Image): Multi-Frame-Hold bis FG
+        --     placeable oder bis Hold-Deadline (Sicherheits-Timeout
+        --     fuer ein nie ladendes Video).
         -- Muss VOR end_cycle_fade() laufen, weil end_cycle_fade() die
         -- Resource am Cycle-Boundary disposen kann.
         if pending_image_hold then
-            if video_ready or t >= pending_image_hold.deadline then
+            if pending_image_hold.one_shot then
+                pcall(function() draw_fit(pending_image_hold.res, 1) end)
+                clear_pending_image_hold()
+            elseif video_ready or t >= pending_image_hold.deadline then
                 clear_pending_image_hold()
             else
                 pcall(function() draw_fit(pending_image_hold.res, 1) end)
