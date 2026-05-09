@@ -194,7 +194,11 @@ def parse_playlist(text, default_dur):
         line = line.strip()
         if line.startswith("#EXTINF:"):
             try:
-                duration = int(line.split("#EXTINF:", 1)[1].split(",", 1)[0])
+                # float() akzeptiert sowohl ganze Zahlen ("10") als auch
+                # Dezimalwerte ("7.5", "0.25"). Ergebnis wird unveraendert
+                # ins Manifest uebernommen; die Lua-Seite konsumiert es
+                # mit tonumber(), das ebenfalls Floats unterstuetzt.
+                duration = float(line.split("#EXTINF:", 1)[1].split(",", 1)[0])
             except Exception:
                 pass
         elif line and not line.startswith("#"):
@@ -674,7 +678,7 @@ def main():
             update_time(cfg)
             playlist_url   = (cfg.get("playlist_url") or "").strip()
             cfg_base_url   = (cfg.get("base_url")     or "").strip()
-            default_dur    = int(cfg.get("default_duration") or 10)
+            default_dur    = float(cfg.get("default_duration") or 10)
             poll_interval  = max(5,  int(cfg.get("poll_interval")  or 60))
             retry_interval = max(5,  int(cfg.get("retry_interval") or 30))
             # verify + Warning-Handling zentral via get_https_verify,
@@ -795,7 +799,10 @@ def main():
             # Hash ueber tatsaechlich verfuegbare Folien — auch bei
             # gleichem Playlist-Body neu schreiben, falls neue Downloads
             # hinzugekommen sind.
-            sig = "|".join("%s:%d" % (e["name"], e["duration"]) for e in available)
+            # %s statt %d, weil duration nun float sein kann (EXTINF-
+            # Dezimalwerte). %d wuerde mit TypeError abbrechen, sobald
+            # eine Folie eine nicht-ganzzahlige Dauer hat.
+            sig = "|".join("%s:%s" % (e["name"], e["duration"]) for e in available)
             available_hash = hashlib.sha1(sig.encode("utf-8")).hexdigest()
 
             if available_hash != last_manifest_hash:
